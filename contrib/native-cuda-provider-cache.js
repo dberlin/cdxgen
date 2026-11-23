@@ -1,9 +1,12 @@
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, createReadStream, existsSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 
+import { readRegularTextFile } from "../lib/core/boundedFile.js";
+import { nativeNvidiaAptKeyBytes, nativeNvidiaAptReleaseIndex, nativePackageFileExports, nativeProgramNames } from "../lib/ecosystems/nativeExternalMetadata.js";
 import { nativeProviderCacheWriter } from "./native-provider-cache.js";
 import { nativeProviderExecutionContext } from "./native-provider-process.js";
 import { nativeAcquisitionRemaining, nativeAcquisitionUrl } from "./native-acquisition-policy.js";
@@ -42,7 +45,10 @@ export function cudaArchiveExports(files) {
       names.add((unix || windows)[1]);
     }
   }
-  return [...names].filter((name) => safeName.test(name)).sort().map((name) => ({ kind: "library", name }));
+  return [
+    ...[...names].filter((name) => safeName.test(name)).sort().map((name) => ({ kind: "library", name })),
+    ...nativePackageFileExports(files).filter((entry) => entry.kind === "tool"),
+  ];
 }
 
 /** Only architecture-valid export inputs enter the consumer's files field.
@@ -81,29 +87,32 @@ export function cudaToolkitExports(document) {
   return [...new Set([...document.matchAll(/\bFind([A-Z][A-Za-z0-9_]*)\b/g)].map((m) => m[1]))].sort().map((name) => ({ kind: "cmake-package", name }));
 }
 
-async function fileHash(path) {
+async function fileHash(path, deadline = Date.now() + REQUEST_MS) {
   const digest = createHash("sha256");
-  for await (const chunk of createReadStream(path)) digest.update(chunk);
+  for await (const chunk of createReadStream(path)) {
+    nativeAcquisitionRemaining(deadline, REQUEST_MS);
+    digest.update(chunk);
+  }
   return digest.digest("hex");
 }
 
 function trustedUrl(value) {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.username || url.password || !(
-    url.hostname === "developer.download.nvidia.com" && /^\/compute\/(?:cuda\/(?:redist\/|repos\/ubuntu2204\/x86_64\/)|cusparselt\/redist\/)/.test(url.pathname) ||
+    url.hostname === "developer.download.nvidia.com" && /^\/compute\/(?:cuda\/(?:redist\/|repos\/ubuntu(?:1804|2204)\/x86_64\/)|cusparselt\/redist\/)/.test(url.pathname) ||
     url.hostname === "docs.nvidia.com" && url.pathname.startsWith("/cuda/")
   )) throw new Error("Unapproved NVIDIA evidence URL");
   return url;
 }
 
-async function acquire(context, url, path, fetchAllowed, maxBytes, expectedHash, expectedSize) {
+async function acquire(context, url, path, fetchAllowed, maxBytes, expectedHash, expectedSize, refresh = false) {
   nativeAcquisitionRemaining(context.deadline, REQUEST_MS);
   trustedUrl(url);
   context.cache.file(path);
-  if (existsSync(path)) {
+  if (!refresh && existsSync(path)) {
     const size = statSync(path).size;
-    if (size <= maxBytes && (!expectedSize || size === Number(expectedSize)) && (!expectedHash || await fileHash(path) === expectedHash)) return;
-    throw new Error(`Cached evidence failed size or hash validation: ${path}`);
+    if (size <= maxBytes && (!expectedSize || size === Number(expectedSize)) && (!expectedHash || await fileHash(path, context.deadline) === expectedHash)) return;
+    if (!fetchAllowed) throw new Error(`Cached evidence failed size or hash validation: ${path}`);
   }
   if (!fetchAllowed) throw new Error(`Missing frozen evidence: ${path}; pass --fetch to acquire`);
   nativeAcquisitionUrl(url, context.allowedHosts);
@@ -136,24 +145,11 @@ async function acquire(context, url, path, fetchAllowed, maxBytes, expectedHash,
 async function archiveFiles(context, path) {
   const timeout = nativeAcquisitionRemaining(context.deadline, REQUEST_MS);
   const command = path.endsWith(".zip") ? [context.execution.executables.unzip, "-Z1", path] : [context.execution.executables.tar, "-tf", path];
-  const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe", cwd: context.execution.cwd, env: context.execution.env });
-  const timer = setTimeout(() => child.kill(), timeout);
-  async function bounded(stream) {
-    const chunks = []; let size = 0;
-    for await (const chunk of stream) {
-      size += chunk.byteLength;
-      if (size > MAX_METADATA) { child.kill(); throw new Error("Oversized archive listing"); }
-      chunks.push(chunk);
-    }
-    return Buffer.concat(chunks).toString("utf8");
-  }
-  try {
-    const [stdout, stderr, exit] = await Promise.all([bounded(child.stdout), bounded(child.stderr), child.exited]);
-    if (exit !== 0) throw new Error(`Archive listing failed (${exit}): ${stderr.slice(0, 500)}`);
-    const files = stdout.split(/\r?\n/).filter(Boolean);
-    if (files.some((file) => file.startsWith("/") || file.split("/").includes("..") || file.includes("\\"))) throw new Error("Unsafe archive member");
-    return files;
-  } finally { clearTimeout(timer); }
+  const stdout = execFileSync(command[0], command.slice(1), { cwd: context.execution.cwd, env: context.execution.env, encoding: "utf8",
+    timeout, maxBuffer: MAX_METADATA, stdio: ["ignore", "pipe", "pipe"] });
+  const files = stdout.split(/\r?\n/).filter(Boolean);
+  if (files.some((file) => file.startsWith("/") || file.split("/").includes("..") || file.includes("\\"))) throw new Error("Unsafe archive member");
+  return files;
 }
 
 function writeJson(context, path, value) {
@@ -175,12 +171,15 @@ async function debianDataArchive(context, path, output) {
       const size = Number(header.subarray(48, 58).toString().trim());
       const start = offset + 60;
       if (!Number.isSafeInteger(size) || size < 0 || start + size > total) throw new Error("Invalid Debian member size");
-      if (/^data\.tar(?:\.(?:xz|gz|zst|bz2))?$/.test(name)) {
+      if (size > 0 && /^data\.tar(?:\.(?:xz|gz|zst|bz2))?$/.test(name)) {
         const destination = join(output, `${basename(path)}.${name}`);
         const temporary = `${destination}.${randomUUID()}.partial`;
         const fd = context.cache.openExclusive(temporary);
         try {
-          for await (const chunk of createReadStream(path, { start, end: start + size - 1 })) writeFileSync(fd, chunk);
+          for await (const chunk of createReadStream(path, { start, end: start + size - 1 })) {
+            nativeAcquisitionRemaining(context.deadline, REQUEST_MS);
+            writeFileSync(fd, chunk);
+          }
           closeSync(fd);
           context.cache.replace(temporary, destination);
         } catch (error) {
@@ -226,12 +225,133 @@ async function acquireDriver(context, output, version, fetchAllowed) {
     acquisition: { component: fields.Package, version: fields.Version, platform: "linux", arch: "x64", url, sha256: fields.SHA256, size: Number(fields.Size), fileList } };
 }
 
+const cudaLibraryComponent = (name) => name.replace(/^lib/, "").replace(/\.(?:a|so(?:\.\d+)*|lib|dll)$/, "").replace(/_static$/, "");
+
+/** NVIDIA's historical Linux APT catalog predates per-release redistrib JSON.
+ * Candidate package names narrow this one index; only acquired archive member
+ * inventory authorizes any library export.
+ */
+export async function acquireNativeCudaHistoricalComponents({ output: directory, manifestName = "native-provider-metadata.json", sourceRoot, libraries, release, retained = [], fetch: network = false, allowedHosts, deadline }) {
+  const output = resolve(directory);
+  const context = { cache: cudaProviderCache(output, sourceRoot),
+    execution: nativeProviderExecutionContext(sourceRoot, output, ["tar", "unzip"]), allowedHosts, deadline };
+  context.cache.mkdir(join(output, "artifacts"));
+  const base = `${NVIDIA}cuda/repos/ubuntu1804/x86_64/`;
+  const indexName = "nvidia-ubuntu1804-x86_64-Packages.gz";
+  const indexPath = join(output, indexName);
+  const releasePath = "nvidia-ubuntu1804-x86_64.InRelease";
+  const keyringPath = "nvidia-3bf863cc.gpg";
+  const releaseFile = join(output, releasePath);
+  const keyring = join(output, keyringPath);
+  const keyPath = join(output, "nvidia-3bf863cc.asc");
+  let releaseText = readRegularTextFile(releaseFile, MAX_METADATA, output);
+  const verify = () => releaseText && context.cache.file(keyring) && existsSync(keyring) &&
+    nativeNvidiaAptReleaseIndex(releaseText, keyring, context.execution.cwd, deadline);
+  let signed = verify();
+  if (!signed && network) {
+    await acquire(context, `${base}3bf863cc.pub`, keyPath, true, 32768, undefined, undefined, true);
+    const publicKey = nativeNvidiaAptKeyBytes(readRegularTextFile(keyPath, 32768, output) || "");
+    if (!publicKey) throw new Error("NVIDIA signed archive public key armor is invalid");
+    context.cache.write(keyring, publicKey);
+    await acquire(context, `${base}InRelease`, releaseFile, true, MAX_METADATA, undefined, undefined, true);
+    releaseText = readRegularTextFile(releaseFile, MAX_METADATA, output);
+    signed = verify();
+  }
+  if (!signed) throw new Error("NVIDIA historical APT release signature did not verify");
+  await acquire(context, `${base}Packages.gz`, indexPath, network, MAX_METADATA, signed.sha256, signed.size);
+  const indexSha256 = signed.sha256;
+  const releaseSha256 = hash(releaseText);
+  const keyringSha256 = await fileHash(keyring, deadline);
+  nativeAcquisitionRemaining(deadline);
+  const index = gunzipSync(readFileSync(indexPath), { maxOutputLength: 64 * 1024 * 1024 }).toString("utf8");
+  const wanted = new Set(libraries.map(cudaLibraryComponent));
+  const channel = release ? release.split(".").slice(0, 2).join("-") : undefined;
+  const compare = new Intl.Collator("en", { numeric: true });
+  const selected = new Map();
+  for (const stanza of index.split("\n\n")) {
+    const pkg = /^Package: (cuda-([A-Za-z0-9_+-]+?)(-dev)?-(\d+-\d+))$/m.exec(stanza);
+    if (!pkg || !wanted.has(pkg[2]) || channel && pkg[4] !== channel || !/^Architecture: amd64$/m.test(stanza)) continue;
+    const fields = Object.fromEntries([...stanza.matchAll(/^(Package|Version|Filename|Size|SHA256): (\S+)$/gm)].map((m) => [m[1], m[2]]));
+    const filename = fields.Filename?.replace(/^\.\//, "");
+    if (!filename || !/^[A-Za-z0-9_.+~-]+\.deb$/.test(filename) || !/^\d[0-9A-Za-z.+_~:-]*$/.test(fields.Version || "") ||
+      !/^[a-f0-9]{64}$/.test(fields.SHA256 || "") || !/^\d+$/.test(fields.Size || "") ||
+      Number(fields.Size) <= 0 || Number(fields.Size) > MAX_ARTIFACT) continue;
+    const key = `${pkg[2]}:${pkg[3] || "runtime"}`;
+    if (selected.has(key) && compare.compare(selected.get(key).fields.Version, fields.Version) >= 0) continue;
+    selected.set(key, { fields, filename, stanza, component: pkg[2], channel: pkg[4] });
+  }
+  const providers = []; const unavailable = []; const observed = new Set();
+  const retainedArtifacts = new Map(retained.filter((entry) => entry.verifiedInventory?.packageSha256)
+    .map((entry) => [entry.verifiedInventory.packageSha256, entry]));
+  let budget = 160 * 1024 * 1024;
+  for (const { fields, filename, stanza, component, channel: historicalChannel } of selected.values()) {
+    const url = `${base}${filename}`;
+    if (Number(fields.Size) > budget) {
+      unavailable.push({ component, url, reason: "Historical CUDA archive byte budget exceeded" }); continue;
+    }
+    budget -= Number(fields.Size);
+    try {
+      const cached = retainedArtifacts.get(fields.SHA256);
+      if (cached?.name === fields.Package && cached?.version === fields.Version) {
+        providers.push({ metadata: { path: basename(cached.metadataPath), format: "provider-snapshot", sha256: cached.metadataSha256 } });
+        for (const entry of cached.exports) observed.add(entry.name);
+        continue;
+      }
+      const artifact = join(output, "artifacts", filename);
+      await acquire(context, url, artifact, network, MAX_ARTIFACT, fields.SHA256, fields.Size);
+      const data = await debianDataArchive(context, artifact, join(output, "artifacts"));
+      const files = await archiveFiles(context, data);
+      const requested = new Set(libraries.filter((name) => cudaLibraryComponent(name) === component));
+      const usable = files.filter((file) => !/\/stubs\//.test(file));
+      const matching = nativePackageFileExports(usable).filter((entry) => entry.kind === "library" && requested.has(entry.name));
+      if (!matching.length) throw new Error("Package archive has none of its requested historical CUDA libraries");
+      const stanzaName = `${filename}.control.txt`;
+      context.cache.write(join(output, stanzaName), stanza);
+      const inventoryName = `${filename}.files.json`;
+      const inventorySha256 = writeJson(context, join(output, inventoryName), { schema: 1, acquisitionUrl: url,
+        repositoryUrl: `${base}Packages.gz`, repositoryPath: indexName, repositorySha256: indexSha256, stanzaPath: stanzaName,
+        releasePath, keyringPath, keyringSha256,
+        packageArtifact: `artifacts/${filename}`, packageSha256: fields.SHA256,
+        artifact: `artifacts/${basename(data)}`, sha256: await fileHash(data, deadline), files });
+      const owned = [...new Set(matching.map((entry) => entry.file))];
+      const snapshot = cudaArchiveSnapshot({ component: fields.Package, version: fields.Version, platform: "linux", arch: "x64" }, owned,
+        [{ path: releasePath, sha256: releaseSha256 }, { path: stanzaName, sha256: hash(stanza) }, { path: inventoryName, sha256: inventorySha256 }],
+        [`Historical NVIDIA CUDA ${historicalChannel.replace("-", ".")} APT component for Ubuntu amd64; available, not installed or selected`,
+          "Component package release from the authenticated vendor package index, not an inferred CUDA toolkit release"]);
+      snapshot.verifiedInventory = inventoryName;
+      const path = `${filename}-${hash(JSON.stringify(owned)).slice(0, 20)}.provider.json`;
+      providers.push({ metadata: { path, format: "provider-snapshot", sha256: writeJson(context, join(output, path), snapshot) } });
+      for (const entry of matching) observed.add(entry.name);
+    } catch (error) { unavailable.push({ component, url, reason: String(error.message).split("\n")[0] }); }
+  }
+  const manifestPath = join(output, manifestName);
+  writeJson(context, manifestPath, { schema: 1, providers });
+  return { manifestPath, providers: providers.length, unavailable, missingIdentities: libraries.filter((name) => !observed.has(name)) };
+}
+
+export function nativeCudaQueryPlan(requirements) {
+  const toolkit = new Set(); const names = new Set(); const libraries = new Set();
+  for (const requirement of requirements) {
+    if (["find_package", "find_dependency"].includes(requirement.command) && ["CUDA", "CUDAToolkit"].includes(requirement.requestedName)) {
+      toolkit.add(requirement.requestedName);
+    }
+    for (const name of nativeProgramNames(requirement)) if (safeName.test(name)) names.add(name);
+    if (requirement.command === "find_library" && safeName.test(requirement.requestedName || "") &&
+      requirement.arguments?.some((arg) => typeof arg === "string" && /\bCUDAToolkit_|^CUDA_PATH$/.test(arg))) {
+      for (const name of [requirement.requestedName, ...(requirement.alternatives || [])]) if (safeName.test(name)) libraries.add(name);
+    }
+  }
+  return { toolkit: [...toolkit].sort(), programs: [...names].sort(), libraries: [...libraries].sort() };
+}
+
 /** Reusable exact release/platform orchestration; no guessed toolkit release. */
-export async function acquireNativeCudaProviders({ output: directory, sourceRoot, cudaRelease, cusparseltRelease, nvtxRelease, driverVersion, platforms: platformInput, fetch: network = false, allowedHosts, requirements = [], deadline = Date.now() + 300000 }) {
+export async function acquireNativeCudaProviders({ output: directory, manifestName: outputManifest = "native-provider-metadata.json", sourceRoot, cudaRelease, cusparseltRelease, nvtxRelease, driverVersion, platforms: platformInput, fetch: network = false, allowedHosts, requirements = [], retained = [], deadline = Date.now() + 300000 }) {
   nativeAcquisitionRemaining(deadline);
   const options = new Map([["--output", directory], ["--source-root", sourceRoot], ["--cuda-release", cudaRelease],
     ["--cusparselt-release", cusparseltRelease], ["--nvtx-release", nvtxRelease], ["--driver-version", driverVersion], ["--platforms", platformInput]]);
   if (network) options.set("--fetch", true);
+  const retainedArtifacts = new Map(retained.filter((entry) => entry.verifiedInventory && !entry.verifiedInventory.packageSha256)
+    .map((entry) => [entry.verifiedInventory.sha256, entry]));
   if (!platformInput) throw new Error("An exact NVIDIA target platform is required");
   const output = resolve(options.get("--output"));
   const source = realpathSync(resolve(options.get("--source-root") || dirname(dirname(fileURLToPath(import.meta.url)))));
@@ -247,6 +367,11 @@ export async function acquireNativeCudaProviders({ output: directory, sourceRoot
   const providers = []; const unavailable = []; const acquisitions = []; const observed = new Set();
   const processedAssets = new Set();
   const fetchAllowed = options.has("--fetch");
+  const plan = nativeCudaQueryPlan(requirements);
+  const acquireToolkit = !requirements.length || plan.toolkit.length > 0;
+  const programDemand = new Set(plan.programs.map((program) => program.replace(/\.exe$/i, "")));
+  const exactDemand = new Set([...programDemand, ...plan.libraries.map(cudaLibraryComponent)]);
+  const expected = new Set([...plan.toolkit, ...plan.libraries]);
   const selections = [
     { family: "cuda", release: options.get("--cuda-release") },
     { family: "cuda", release: options.get("--nvtx-release"), nvtxOnly: true },
@@ -266,7 +391,18 @@ export async function acquireNativeCudaProviders({ output: directory, sourceRoot
     const manifestBytes = readFileSync(join(output, frozenManifest));
     const manifest = JSON.parse(manifestBytes);
     if (manifest.release_label !== undefined && manifest.release_label !== release) throw new Error("NVIDIA release label mismatch");
-    const components = Object.keys(manifest).filter((name) => nvtxOnly ? /^(?:cuda|nsight)_nvtx$/.test(name) : /^(?:cuda_(?:cudart|cupti|nvml_dev|nvtx|nvcc)|nsight_nvtx|lib(?:cufft|cusparse|cusparse_lt|nvfatbin|nvptxcompiler))$/.test(name));
+    const components = Object.keys(manifest).filter((name) => {
+      if (nvtxOnly) return /^(?:cuda|nsight)_nvtx$/.test(name);
+      const key = name.replace(/^(?:cuda_|lib)/, "");
+      const declaredName = manifest[name]?.name;
+      if (exactDemand.has(key) || exactDemand.has(declaredName)) {
+        for (const candidate of [key, declaredName]) if (programDemand.has(candidate)) {
+          for (const spelling of [candidate, `${candidate}.exe`]) if (plan.programs.includes(spelling)) expected.add(spelling);
+        }
+        return true;
+      }
+      return acquireToolkit && /^(?:cuda_(?:cudart|cupti|nvml_dev|nvtx|nvcc)|nsight_nvtx|lib(?:cufft|cusparse|cusparse_lt|nvfatbin|nvptxcompiler))$/.test(name);
+    });
     const assets = cudaRedistributables(manifest, components, platforms);
     for (let i = 0; i < assets.length; i += 3) {
       await Promise.all(assets.slice(i, i + 3).map(async (asset) => {
@@ -277,17 +413,27 @@ export async function acquireNativeCudaProviders({ output: directory, sourceRoot
         const artifactPath = join(output, "artifacts", artifactName);
         const url = `${base}${asset.relative_path}`;
         try {
+          const cached = retainedArtifacts.get(asset.sha256);
+          if (cached?.name === asset.component && cached?.version === asset.version && cached.platform === asset.platform && cached.arch === asset.arch) {
+            const fileList = basename(cached.verifiedInventory.inventoryPath);
+            providers.push({ metadata: { path: basename(cached.metadataPath), format: "provider-snapshot", sha256: cached.metadataSha256 } });
+            for (const entry of cached.exports) observed.add(entry.name);
+            acquisitions.push({ component: asset.component, version: asset.version, platform: asset.platform, arch: asset.arch, url, sha256: asset.sha256, size: Number(asset.size), fileList });
+            return;
+          }
           await acquire(context, url, artifactPath, fetchAllowed, MAX_ARTIFACT, asset.sha256, asset.size);
           const files = await archiveFiles(context, artifactPath);
           const fileList = `${artifactName}.files.json`;
-          const fileListHash = writeJson(context, join(output, fileList), { schema: 1, acquisitionUrl: url, artifact: `artifacts/${artifactName}`, sha256: asset.sha256, size: Number(asset.size), files });
+          const fileListHash = writeJson(context, join(output, fileList), { schema: 1, acquisitionUrl: url, artifact: `artifacts/${artifactName}`, sha256: asset.sha256,
+            vendorManifest: frozenManifest, relativePath: asset.relative_path, platformKey: asset.platformKey, variant: asset.variant, size: Number(asset.size), files });
           const conditions = [`NVIDIA redistributable ${family} ${release}; available, not installed or selected`];
           if (asset.variant) conditions.push(`NVIDIA variant ${asset.variant}`);
           if (files.some((f) => /\/stubs\/libnvidia-ml\.so$/.test(f))) conditions.push("NVML SDK link stub only; not an installed NVIDIA driver or driver runtime version");
           const snapshot = cudaArchiveSnapshot(asset, files,
             [{ path: frozenManifest, sha256: hash(manifestBytes) }, { path: fileList, sha256: fileListHash }], conditions);
+          snapshot.verifiedInventory = fileList;
           const { exports } = snapshot;
-          if (!exports.length) throw new Error("Artifact has no library exports");
+          if (!exports.length) throw new Error("Artifact has no native library or executable exports");
           const snapshotPath = `${asset.component}-${asset.version}-${asset.platformKey}${asset.variant ? `-${asset.variant}` : ""}.provider.json`;
           providers.push({ metadata: { path: snapshotPath, format: "provider-snapshot", sha256: writeJson(context, join(output, snapshotPath), snapshot) } });
           for (const item of exports) observed.add(item.name);
@@ -295,7 +441,7 @@ export async function acquireNativeCudaProviders({ output: directory, sourceRoot
         } catch (error) { unavailable.push({ component: asset.component, platform: asset.platformKey, url, reason: error.message }); }
       }));
     }
-    if (family === "cuda" && !nvtxOnly) {
+    if (family === "cuda" && !nvtxOnly && acquireToolkit) {
       const documentName = `cuda-${release}-installation-guide.html`;
       const documentUrl = `https://docs.nvidia.com/cuda/archive/${release}/cuda-installation-guide-linux/index.html`;
       try {
@@ -329,14 +475,15 @@ export async function acquireNativeCudaProviders({ output: directory, sourceRoot
     } catch (error) { unavailable.push({ component: "nvidia-driver", reason: error.message }); }
   }
   providers.sort((a, b) => a.metadata.path.localeCompare(b.metadata.path));
-  const manifestPath = join(output, "native-provider-metadata.json");
+  const manifestPath = join(output, outputManifest);
   writeJson(context, manifestPath, { schema: 1, providers });
-  const missingIdentities = requirements.map((r) => r.requestedName).filter((name) => name && !observed.has(name)).sort();
+  const missingIdentities = [...expected].filter((name) => !observed.has(name)).sort();
   const rawPaths = new Set(selections.filter((s) => s.release).flatMap(({ family, release }) => [`${family}-redist-index.html`, `${family}-redistrib_${release}.json`]));
   rawPaths.add(`cuda-${options.get("--cuda-release")}-installation-guide.html`);
   if (driverVersion) rawPaths.add("nvidia-ubuntu2204-x86_64-Packages.gz");
-  const rawMetadata = await Promise.all([...rawPaths].sort().filter((path) => existsSync(join(output, path))).map(async (path) => ({ path, sha256: await fileHash(join(output, path)) })));
-  writeJson(context, join(output, "acquisition-report.json"), { schema: 1, manifestPath, providers: providers.length, rawMetadata, acquisitions, unavailable, missingIdentities });
+  const rawMetadata = await Promise.all([...rawPaths].sort().filter((path) => existsSync(join(output, path))).map(async (path) => ({ path, sha256: await fileHash(join(output, path), deadline) })));
+  writeJson(context, join(output, outputManifest === "native-provider-metadata.json" ? "acquisition-report.json" : `${outputManifest}.report.json`),
+    { schema: 1, manifestPath, providers: providers.length, rawMetadata, acquisitions, unavailable, missingIdentities });
   return { manifestPath, providers: providers.length, acquiredArtifacts: acquisitions.length, unavailable, missingIdentities };
 }
 

@@ -1421,9 +1421,9 @@ Unknown markers, compound expressions, extras and unsupported specifiers stay
 unresolved. Versions are never borrowed from another installed environment.
 
 `--native-version-probes` (default `false`, library option
-`nativeVersionProbes`) permits the narrowly supported installed zlib-ng API
-probe after static metadata lookup. It also requires existing project-tooling
-permission. Outside secure mode, a local invocation is:
+`nativeVersionProbes`) permits the narrowly supported installed zlib-ng
+version adapter after static metadata lookup. It also requires existing
+project-tooling permission. Outside secure mode, a local invocation is:
 
 ```sh
 bun bin/cdxgen.js -t c /environment/lib/pythonX.Y/site-packages/zlib_ng \
@@ -1438,13 +1438,19 @@ may supply the explicit option, still subject to tooling policy.
 
 Nothing is installed or compiled by this adapter. It requires a single
 same-site, non-symlink distribution owning the exact extension/license through
-verified `RECORD` SHA256 and size metadata. Its compatible existing Python
-runtime directly loads that extension, not package initialization or site
-hooks. `ZLIBNG_RUNTIME_VERSION` and `ZLIBNG_VERSION` identify the native
-release; zlib compatibility values are recorded separately, never substituted
-as the zlib-ng version.
+verified `RECORD` SHA256 and size metadata. The adapter first reads the
+`zng_vstring` symbol from a read-only `.rodata` section in the verified
+ELF extension. This does not load the extension or run Python. The BOM
+records `cdx:nativeVersion:method=elf-symbol`, the symbol and section, and
+the ownership paths.
 
-The probe requires Linux, `/usr/bin/bwrap` and usable user/PID/network
+If static extraction cannot prove a version, the `sandboxed-runtime-api`
+fallback loads only the verified extension with a compatible existing
+Python, not package initialization or site hooks. `ZLIBNG_RUNTIME_VERSION`
+and `ZLIBNG_VERSION` identify the native release; zlib compatibility values
+are recorded separately, never substituted as the zlib-ng version.
+
+The runtime fallback requires Linux, `/usr/bin/bwrap` and usable user/PID/network
 namespaces. It uses read-only runtime/extension mounts, a cleared environment,
 dropped capabilities, a new session, closed inherited descriptors and no home
 or `/proc`. Execution is capped at ten seconds and each output stream at

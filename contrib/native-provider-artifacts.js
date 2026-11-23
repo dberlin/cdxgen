@@ -82,7 +82,8 @@ export async function acquireNativeProviderSourceMetadata({ record, recipe, usag
       const listing = suffix === ".zip" ? command("/usr/bin/unzip", ["-Z1", archive], 8 * 1024 * 1024) : command("/usr/bin/tar", ["-tf", archive], 8 * 1024 * 1024);
       const members = listing.split(/\r?\n/).filter((path) => path && !path.startsWith("/") && !path.split("/").includes("..") && !/[\x00-\x1f*?\[\]]/.test(path));
       const selected = members.filter((path) => !/(?:^|\/)(?:tests?|examples?|third[-_]party|subprojects)(?:\/|$)/i.test(path) &&
-        (/\.pc\.in$/.test(path) || wantedHeaders.has(basename(path)) || ["CMakeLists.txt", "meson.build"].includes(basename(path))))
+        (/\.pc\.in$/.test(path) || wantedHeaders.has(basename(path)) ||
+          ["CMakeLists.txt", "meson.build", "Cargo.toml", "pyproject.toml"].includes(basename(path))))
         .sort((a, b) => Number(!a.endsWith(".pc.in")) - Number(!b.endsWith(".pc.in")) || a.split("/").length - b.split("/").length).slice(0, 64);
       for (const member of selected) {
         const content = suffix === ".zip" ? command("/usr/bin/unzip", ["-p", archive, member], 1024 * 1024) : command("/usr/bin/tar", ["-xOf", archive, "--", member], 1024 * 1024);

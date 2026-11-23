@@ -23,6 +23,14 @@ describe("NVIDIA SDK evidence acquisition", () => {
     ]);
   });
 
+  it("records literal SDK executable paths and aliases without mistaking plain archive files for tools", () => {
+    const exports = cudaArchiveExports(["sdk/bin/cuobjdump.exe", "sdk/elsewhere/not-a-tool", "sdk/bin/../../wrong"]);
+    assert.deepEqual(exports.map(({ kind, name, file }) => [kind, name, file]), [
+      ["tool", "cuobjdump.exe", "sdk/bin/cuobjdump.exe"],
+      ["tool", "cuobjdump", "sdk/bin/cuobjdump.exe"],
+    ]);
+  });
+
   it("rejects metadata and streaming writes redirected through cache symlinks into source", () => {
     const directory = mkdtempSync(join(tmpdir(), "cuda-provider-cache-"));
     const source = join(directory, "source");

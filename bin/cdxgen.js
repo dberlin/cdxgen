@@ -464,7 +464,7 @@ const args = _yargs
     type: "boolean",
     default: false,
     description:
-      "Query supported installed native-library APIs in a read-only, network/PID-isolated sandbox. Requires project-tooling permission; unavailable probes remain unresolved.",
+      "Read supported installed native-library versions from verified metadata or a sandboxed API. Requires project-tooling permission.",
   })
   .option("native-acquire", {
     type: "boolean",
@@ -487,6 +487,20 @@ const args = _yargs
     type: "string",
     description: "Comma-separated fedora=HTTPS_BASE,updates=HTTPS_BASE exact-release RPM metadata contexts. Host DNF repositories are never used.",
   })
+  .option("native-deb-repositories", {
+    type: "string",
+    description: "Comma-separated HTTPS_ROOT|SUITE|COMPONENT|ARCH|/absolute/TRUSTED_KEYRING.gpg contexts for signed DEB metadata. Host APT sources are never used.",
+  })
+  .option("native-deb-replay", {
+    type: "string",
+    array: true,
+    nargs: 1,
+    description: "Reverify a selected signed DEB cache descriptor offline. Repeat for multiple descriptors. Launch arguments only.",
+  })
+  .option("native-mlir-aie-wheel", {
+    type: "string",
+    description: "Exact public MLIR-AIE VERSION:WHEEL-TAG for discovered aie-hsaco requests. Never installs the wheel.",
+  })
   .option("native-apple-sdks", {
     type: "string",
     description: "Comma-separated owner/repository@COMMIT:SDK.sdk exact Apple SDK/platform contexts for discovered frameworks.",
@@ -498,6 +512,11 @@ const args = _yargs
   .option("native-cuda-platforms", {
     type: "string",
     description: "Comma-separated exact NVIDIA artifact target platforms (for example linux-x86_64).",
+  })
+  .option("native-evidence-format", {
+    choices: ["inline", "shared"],
+    default: "inline",
+    description: "Store repeated C/C++ requirement evidence once in CycloneDX metadata and link each occurrence to it. Inline preserves the legacy property layout.",
   })
   .option("package-extensions", {
     type: "boolean",

@@ -34,6 +34,17 @@ await describe("official RPM metadata acquisition", async () => {
     ]), ["cmake(ExampleSDK)", "cmake(examplesdk)", "libexact.so.3()(64bit)", "libexample.so()(64bit)", "pkgconfig(example-pc)"]);
   });
 
+  it("queries indexed file ownership for literal find_program names and stops at search controls", () => {
+    const requirements = [
+      { requestedName: "schema-gen", command: "find_program", alternatives: ["schema-gen", "schema-alt", "../escape", "${UNKNOWN}"], arguments: ["GEN", "NAMES", "schema-gen", "schema-alt", "../escape", "${UNKNOWN}", "HINTS", "not-a-name"] },
+      { requestedName: "pkgtool", command: "find_program", arguments: ["PKG", "pkgtool", "/other/bin"] },
+    ];
+    const paths = ["/usr/bin/pkgtool", "/usr/bin/schema-alt", "/usr/bin/schema-gen", "/usr/libexec/pkgtool", "/usr/libexec/schema-alt",
+      "/usr/libexec/schema-gen", "/usr/sbin/pkgtool", "/usr/sbin/schema-alt", "/usr/sbin/schema-gen"];
+    assert.deepEqual(nativeRpmFilePatterns(requirements), paths);
+    assert.deepEqual(nativeRpmCapabilities(requirements), paths);
+  });
+
   it("preserves independent RPM EVR and complete newline-separated file ownership", () => {
     const us = "\u001f";
     const raw = ["owner-devel", "2", "7.4.1", "9.fc44", "x86_64", "updates", "/usr/lib64/libapi.so\n/usr/lib64/pkgconfig/api.pc\n/usr/share/doc/owner/read me.txt"].join(us) + "\u001e\n";

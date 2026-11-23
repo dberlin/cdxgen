@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, readSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
+import { Parser as TarParser } from "tar";
 import StreamZip from "node-stream-zip";
 
 import { openRegularFile, readRegularTextFile } from "../lib/core/boundedFile.js";
 import { acquireNativeArchiveIdentity, nativeDeclaredArchiveFiles, nativeDeclaredArchiveOwner } from "../lib/ecosystems/nativeArchiveIdentity.js";
 import { parseCmakeLikeFile } from "../lib/ecosystems/parsers-misc.js";
-import { fetchNativeAcquisitionBytes, nativeAcquisitionRemaining } from "./native-acquisition-policy.js";
+import { fetchNativeAcquisitionBytes, nativeAcquisitionRemaining, nativeAcquisitionUrl } from "./native-acquisition-policy.js";
 import { nativeProviderCacheWriter } from "./native-provider-cache.js";
 
 const MAX_BYTES = 300 * 1024 * 1024;
@@ -22,6 +24,55 @@ export function inspectInstallerHeader(text) {
   const cpack = text.match(/echo\s+"([^"\r\n]+?) Installer Version:\s*([0-9][0-9A-Za-z.+_~-]*),/);
   if (cpack) return { name: cpack[1], version: cpack[2], source: "CPack installer version header" };
   return undefined;
+}
+
+function readDownloadBytes(file, root) {
+  const opened = openRegularFile(file, root);
+  if (!opened) return undefined;
+  try {
+    if (opened.size <= 0 || opened.size > MAX_BYTES) return undefined;
+    const buffer = Buffer.allocUnsafe(opened.size);
+    for (let offset = 0; offset < buffer.length;) {
+      const count = readSync(opened.fd, buffer, offset, buffer.length - offset, offset);
+      if (!count) return undefined;
+      offset += count;
+    }
+    return buffer;
+  } finally { closeSync(opened.fd); }
+}
+
+/** Only the literal CPack STGZ offset is interpreted. The shell is never run. */
+function cpackExecutablePayload(bytes, prefix) {
+  const starts = [...prefix.matchAll(/^tail \$use_new_tail_syntax \+([1-9]\d{0,5}) "\$0" \| gunzip \| \(cd "\$\{toplevel\}" && \$\{extractor\}\) \|\| cpack_echo_exit "[^"\r\n]+"[ \t]*\r?$/gm)];
+  if (starts.length !== 1 || !prefix.startsWith("#!/bin/sh\n")) return undefined;
+  let offset = -1;
+  for (let lines = Number(starts[0][1]) - 1; lines > 0; lines--) {
+    offset = bytes.indexOf(10, offset + 1);
+    if (offset < 0 || offset >= MAX_PREFIX) return undefined;
+  }
+  offset++;
+  if (offset <= starts[0].index || bytes[offset] !== 0x1f || bytes[offset + 1] !== 0x8b ||
+    !/\nexit 0\n(?:#[^\r\n]*\n|\n)*$/.test(bytes.subarray(0, offset).toString("utf8"))) return undefined;
+  let tar;
+  try { tar = gunzipSync(bytes.subarray(offset), { maxOutputLength: 64 * 1024 * 1024 }); } catch { return undefined; }
+  return new Promise((resolvePayload) => {
+    const seen = new Set(); const members = []; let invalid = false;
+    const parser = new TarParser({ strict: true, onReadEntry(entry) {
+      const member = entry.path.replace(/^\.\//, "").replace(/\/$/, "");
+      if (seen.size >= 4096 || seen.has(member) || !member || member.length > 1024 ||
+        /[\\:\x00-\x1f]/.test(member) || member.split("/").some((part) => !part || part === "." || part === "..")) invalid = true;
+      seen.add(member);
+      if (!invalid && /^bin\/[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(member) &&
+        ["File", "OldFile"].includes(entry.type) && entry.mode & 0o111 && entry.size > 0) {
+        const digest = createHash("sha256");
+        entry.on("data", (chunk) => digest.update(chunk));
+        entry.on("end", () => members.push({ member, bytes: entry.size, mode: entry.mode, sha256: digest.digest("hex") }));
+      } else entry.resume();
+    } });
+    parser.on("error", () => resolvePayload(undefined));
+    parser.on("close", () => resolvePayload(!invalid && members.length ? { payloadOffset: offset, members } : undefined));
+    parser.end(tar);
+  });
 }
 
 export function githubReleaseIdentity(input) {
@@ -88,11 +139,15 @@ function ensureCacheDirectory(directory) {
 
 /** Explicit bounded acquisition, shared by the normal CLI and standalone tool.
  * A declared checksum authenticates generic archives before any interpretation. */
-export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, name, allowedHosts, deadline = Date.now() + 300000 }) {
+export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, name, allowedHosts, localArtifact, deadline = Date.now() + 300000 }) {
   nativeAcquisitionRemaining(deadline);
   const root = externalCache(sourceRoot, cache);
   const original = new URL(url);
   if (original.protocol !== "https:" || original.username || original.password || original.hash || original.search) throw new Error("An explicit credential-free HTTPS artifact URL is required");
+  if (localArtifact !== undefined) {
+    if (!urlHash) throw new Error("A declared checksum is required to import a local download artifact");
+    nativeAcquisitionUrl(original, allowedHosts);
+  }
   const writer = nativeProviderCacheWriter(root, sourceRoot);
   ensureCacheDirectory(join(root, "downloads")); ensureCacheDirectory(join(root, "download-artifacts"));
   writer.mkdir("downloads"); writer.mkdir("download-artifacts");
@@ -100,19 +155,16 @@ export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, nam
   let prior;
   try { prior = JSON.parse(readRegularTextFile(join(root, "downloads", `${key}.json`), 128 * 1024, root) || "null"); } catch { /* No trusted URL record. */ }
   let bytes; let finalUrl; let redirectChain;
-  if (prior?.schema === 1 && prior.url === url && /^[a-f0-9]{64}$/.test(prior.sha256 || "") && prior.artifact === `download-artifacts/${prior.sha256}`) {
-    const opened = openRegularFile(join(root, prior.artifact), root);
-    if (opened) {
-      try {
-        if (opened.size > 0 && opened.size <= MAX_BYTES) {
-          const buffer = Buffer.alloc(opened.size); let offset = 0;
-          while (offset < buffer.length) { const count = readSync(opened.fd, buffer, offset, buffer.length - offset, offset); if (!count) break; offset += count; }
-          if (offset === buffer.length && createHash("sha256").update(buffer).digest("hex") === prior.sha256) {
-            bytes = buffer; finalUrl = prior.transportUrl || prior.resolvedUrl;
-            redirectChain = Array.isArray(prior.redirectChain) ? prior.redirectChain : [url, prior.resolvedUrl];
-          }
-        }
-      } finally { closeSync(opened.fd); }
+  if (localArtifact !== undefined) {
+    const input = resolve(localArtifact);
+    bytes = readDownloadBytes(input, dirname(input));
+    if (!bytes) throw new Error("Local download artifact is missing, unsafe or exceeds the byte limit");
+    finalUrl = original.href; redirectChain = [original.href];
+  } else if (prior?.schema === 1 && prior.url === url && /^[a-f0-9]{64}$/.test(prior.sha256 || "") && prior.artifact === `download-artifacts/${prior.sha256}`) {
+    const retained = readDownloadBytes(join(root, prior.artifact), root);
+    if (retained && createHash("sha256").update(retained).digest("hex") === prior.sha256) {
+      bytes = retained; finalUrl = prior.transportUrl || prior.resolvedUrl;
+      redirectChain = Array.isArray(prior.redirectChain) ? prior.redirectChain : [url, prior.resolvedUrl];
     }
   }
   if (!bytes) ({ bytes, resolvedUrl: finalUrl, redirectChain } = await fetchNativeAcquisitionBytes(url, { allowedHosts, deadline, maximum: MAX_BYTES }));
@@ -131,12 +183,37 @@ export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, nam
   const artifact = `download-artifacts/${sha256}`;
   writer.write(artifact, bytes);
   const file = join(root, artifact);
-  const installer = inspectInstallerHeader(bytes.subarray(0, MAX_PREFIX).toString("utf8"));
+  const prefix = bytes.subarray(0, MAX_PREFIX).toString("utf8");
+  const installer = inspectInstallerHeader(prefix);
   const isa = await isaArchiveEvidence(file, bytes.subarray(0, MAX_PREFIX));
   const release = releaseUrl && githubReleaseIdentity(releaseUrl);
-  const identity = await acquireNativeArchiveIdentity(file, url, root, sourceRoot, deadline);
+  const cpack = urlHash && installer?.source === "CPack installer version header";
+  const identity = !cpack && await acquireNativeArchiveIdentity(file, url, root, sourceRoot, deadline);
   let archiveVersion; let archiveName; let providerManifest; let prerequisite;
-  if (urlHash) {
+  const installerFilename = basename(original.pathname);
+  let installerInventory;
+  if (cpack) {
+    const payload = await cpackExecutablePayload(bytes, prefix);
+    if (!payload) prerequisite = "CPack installer payload lacks an authenticated STGZ executable inventory";
+    else {
+      installerInventory = `declared-metadata/${sha256}/installer-inventory.json`;
+      const inventory = JSON.stringify({ schema: 1, url, urlHash, artifact, sha256, bytes: bytes.length,
+        installerFilename, releaseTag: release?.tag, packageName: installer.name, packageVersion: installer.version,
+        packageVersionSource: installer.source, ...payload });
+      writer.write(installerInventory, inventory);
+      const path = `installer-${sha256}.provider.json`;
+      const snapshot = JSON.stringify({ schema: 1, name: installer.name, versionKind: "release", version: installer.version,
+        ...(release ? { repository: release.repository } : {}),
+        files: payload.members.map(({ member }) => member),
+        evidence: [{ path: installerInventory, sha256: createHash("sha256").update(inventory).digest("hex") }],
+        conditions: ["Checksum-verified installer package payload; available, not installed or selected"] });
+      writer.write(path, snapshot);
+      providerManifest = join(root, `installer-${sha256}.manifest.json`);
+      writer.write(`installer-${sha256}.manifest.json`, JSON.stringify({ schema: 1,
+        providers: [{ metadata: { path, format: "provider-snapshot", sha256: createHash("sha256").update(snapshot).digest("hex") } }] }));
+    }
+  }
+  if (urlHash && !cpack) {
     try {
       const files = await nativeDeclaredArchiveFiles(file, root, sourceRoot, deadline);
       const evidence = [];
@@ -182,6 +259,7 @@ export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, nam
     ...(prerequisite ? { prerequisite } : {}),
     ...(release ? { releaseTag: release.tag } : {}),
     ...(installer ? { artifactVersion: installer.version, artifactVersionSource: installer.source } : {}),
+    ...(installerInventory ? { installerInventory, installerFilename } : {}),
     // Archive versions are consumed only after re-authenticating archive metadata,
     // never as an installer-version claim in the URL-only download reader.
     evidence: [...(release ? [`GitHub release asset: ${releaseUrl}`] : []), ...(installer ? [`${installer.source}: ${installer.name} ${installer.version}`] : []),

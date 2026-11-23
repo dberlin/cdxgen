@@ -17,10 +17,18 @@ const namePattern = /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/;
 const versionPattern = /^\d[0-9A-Za-z.+_:~\-]*$/;
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+function addProgramPaths(paths, requirement) {
+  for (const name of [requirement.requestedName, ...(requirement.alternatives || [])]) {
+    if (typeof name !== "string" || !namePattern.test(name)) continue;
+    for (const directory of ["bin", "sbin", "libexec"]) paths.add(`/usr/${directory}/${name}`);
+  }
+}
+
 /** Discovery syntax determines file patterns; no owner/version alias map. */
 export function nativeRpmFilePatterns(requirements) {
   const patterns = new Set();
   for (const requirement of requirements) {
+    if (requirement.command === "find_program") { addProgramPaths(patterns, requirement); continue; }
     const name = requirement.requestedName;
     if (typeof name !== "string" || !namePattern.test(name)) continue;
     if (requirement.command === "find_library") {
@@ -43,7 +51,9 @@ export function nativeRpmFilePatterns(requirements) {
 /** Query the repository's indexed provides, not wildcard full file inventories. */
 export function nativeRpmCapabilities(requirements) {
   const capabilities = new Set();
-  for (const { requestedName: name, command } of requirements) {
+  for (const requirement of requirements) {
+    const { requestedName: name, command } = requirement;
+    if (command === "find_program") { addProgramPaths(capabilities, requirement); continue; }
     if (typeof name !== "string" || !namePattern.test(name)) continue;
     if (["dependency", "pkg_check_modules", "pkg_search_module"].includes(command)) capabilities.add(`pkgconfig(${name})`);
     else if (["find_package", "find_dependency"].includes(command)) {
@@ -56,6 +66,18 @@ export function nativeRpmCapabilities(requirements) {
     }
   }
   return [...capabilities].sort();
+}
+
+export function nativeRpmQueryPlan(requirements) {
+  return {
+    patterns: nativeRpmFilePatterns(requirements),
+    capabilities: nativeRpmCapabilities(requirements),
+    // DNF appends list-valued options. Clear its default comps/updateinfo
+    // demand, and select the regular indexes we fetched and verified.
+    queryArgs: ["--setopt=skip_if_unavailable=0", "--setopt=zchunk=false",
+      "--setopt=optional_metadata_types=", "--setopt=optional_metadata_types=filelists",
+      "repoquery", "--available", "--arch=x86_64,noarch", `--queryformat=${queryFormat}`],
+  };
 }
 
 /** DNF5 uses seven US-separated fields, newline-separated files and final RS. */
@@ -198,10 +220,10 @@ export async function acquireNativeRpmProviders({ requirements, output: destinat
   if (!rel || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))) throw new Error("RPM cache must be outside source root");
   mkdirSync(output, { recursive: true });
   const requirementBytes = JSON.stringify({ requirements, repositories });
-  const patterns = nativeRpmFilePatterns(requirements);
-  const capabilities = nativeRpmCapabilities(requirements);
+  const plan = nativeRpmQueryPlan(requirements);
+  const { patterns, capabilities, queryArgs } = plan;
   if (!capabilities.length) throw new Error("No literal indexed RPM capability queries");
-  const key = hash(requirementBytes).slice(0, 20);
+  const key = hash(JSON.stringify([hash(requirementBytes), plan])).slice(0, 20);
   const acquisition = join(output, `query-${key}-indexed`);
   mkdirSync(acquisition, { recursive: true });
   const stdoutPath = join(acquisition, "repoquery.stdout");
@@ -221,8 +243,7 @@ export async function acquireNativeRpmProviders({ requirements, output: destinat
       ...acquired.flatMap((repo) => [`--repofrompath=${repo.id},${new URL(`file://${repo.directory}/`).href}`, `--enablerepo=${repo.id}`]),
       `--setopt=cachedir=${join(output, "dnf-cache")}`, `--setopt=system_cachedir=${join(output, "dnf-system-cache")}`,
       `--setopt=persistdir=${join(output, "dnf-state")}`, `--setopt=logdir=${join(output, "dnf-logs")}`,
-      "--setopt=skip_if_unavailable=0", "--setopt=optional_metadata_types=filelists",
-      "repoquery", "--available", "--arch=x86_64,noarch", `--queryformat=${queryFormat}`];
+      ...queryArgs];
     const started = new Date().toISOString();
     const queryDeadline = Math.min(deadline, Date.now() + 180000);
     const batches = []; const stdout = []; const stderr = [];
@@ -246,11 +267,15 @@ export async function acquireNativeRpmProviders({ requirements, output: destinat
     writeFileSync(stdoutPath, stdoutBytes, { flag: "wx" });
     writeFileSync(join(acquisition, "repoquery.stderr"), stderrBytes, { flag: "wx" });
     writeJson(provenancePath, { schema: 1, executable: execution.executables.dnf, workingDirectory: execution.cwd, environment: execution.env, mode: "authenticated-local-repository", repositories: acquired, batches, started, completed: new Date().toISOString(), exitCode, timedOut,
-      requirementsSha256: hash(requirementBytes), patterns, capabilities, stdoutSha256: hash(stdoutBytes), stderrSha256: hash(stderrBytes) });
+      requirementsSha256: hash(requirementBytes), patterns, capabilities, queryArgs, stdoutSha256: hash(stdoutBytes), stderrSha256: hash(stderrBytes) });
   }
   const provenance = JSON.parse(boundedText(provenancePath, MAX_METADATA));
   const raw = boundedText(stdoutPath, MAX_QUERY);
-  if (provenance.requirementsSha256 !== hash(requirementBytes) || provenance.stdoutSha256 !== hash(raw) || JSON.stringify(provenance.patterns) !== JSON.stringify(patterns)) throw new Error("Frozen DNF query evidence failed input or content hash verification");
+  if (provenance.requirementsSha256 !== hash(requirementBytes) || provenance.stdoutSha256 !== hash(raw) ||
+    JSON.stringify(provenance.patterns) !== JSON.stringify(patterns) || JSON.stringify(provenance.capabilities) !== JSON.stringify(capabilities) ||
+    JSON.stringify(provenance.queryArgs) !== JSON.stringify(queryArgs)) {
+    throw new Error("Frozen DNF query evidence failed input or content hash verification");
+  }
   const stderr = boundedText(join(acquisition, "repoquery.stderr"), MAX_METADATA);
   if (provenance.stderrSha256 !== hash(stderr)) throw new Error("Frozen DNF stderr failed content hash verification");
   if (provenance.exitCode !== 0) {

@@ -178,6 +178,15 @@ retaining `originalBomRef`, its raw/evaluated arguments and explicit
 `unknown`/`violated` candidate compatibility. An occurrence with no owner in a
 merged component remains unresolved independently. This does not select a
 provider or change configuration-scoped native facts.
+
+For CMake `find_program`, a source owner can also provide a candidate through
+an installed executable target or an owned `install(PROGRAMS)` input. The
+owner's release identifies the source; declared output and install rules do
+not establish that the executable was built, installed, or selected. Package
+inventories can supply separate available tool owners by literal file
+membership. Fedora RPM acquisition queries indexed executable paths for the
+finder's literal names and alternatives, not guessed package names.
+
 Every distinct local recipe also survives independently as a
 `cdx:build:requirement` with role `source-declaration` and command `meson-wrap`,
 owned by the project (or native metadata channel), even when no dependency
@@ -486,6 +495,13 @@ loader/startup injection variables are not passed to probes. No dependencies
 are installed and no configure step is run. Missing or incompatible providers
 remain unresolved.
 
+For Atom header correlation, the host package file inventory is loaded only
+when an include still needs attribution. RPM file lists come from the local
+installed RPM database, not a repository query for a potentially different
+release.
+Formulation toolchain probes use successful stdout; failed probes and wrapper
+diagnostics do not become version fields.
+
 Concrete download metadata can be acquired separately without running an
 installer or writing into the source tree:
 
@@ -549,6 +565,10 @@ The existing cache must be outside the source root. Acquisition reads bounded
 archive metadata without extracting or executing source files. Passive scans
 rehash the retained archive and metadata, require the component's exact version
 and any declared SHA-256 to match, and preserve the original mirror URL/hash.
+If two cached distribution URLs have authenticated evidence of the same
+compressed bytes and independently named upstream project/release metadata,
+the tool emits one component and retains both distribution references.
+Different archive bytes or missing URL-bound evidence stay separate.
 Unknown ownership remains separate; an archive filename alone cannot establish
 an upstream package alias.
 
@@ -561,14 +581,57 @@ configuration. `--native-acquire-hosts` accepts a comma-separated exact HTTPS
 host allowlist, including redirect destinations. Offline and dry-run scans
 retain named missing-evidence diagnostics instead of inventing versions.
 
+Very large CycloneDX source inventories can opt into
+`--native-evidence-format shared`. This stores each repeated exact
+`cdx:build:requirement` JSON value once as a metadata property named
+`cdx:build:requirementTable:sha256:<digest>`; `cdx:build:requirementTable=1`
+identifies the format. Each `cdx:build:requirementLink` carries that entry's
+`sha256:<digest>` value, not a component or dependency ref. Unique and
+unsupported attachment shapes stay inline. A reader can validate and expand
+either layout with `createNativeRequirementEvidenceIndex` in the native
+requirement evidence module. Versions, dependency refs and exact occurrence
+data do not change. `inline` is the default for readers that expect every
+requirement property on its holder.
+Shared mode reserves the table, entry, and link names; do not supply them as
+custom metadata properties.
+
 Provider contexts remain explicit where source declarations do not identify
 them: `--native-registry-revision` pins a vcpkg commit;
 `--native-rpm-repositories` supplies `fedora=HTTPS_BASE,updates=HTTPS_BASE`;
+`--native-deb-repositories` supplies one or more comma-separated
+`HTTPS_ROOT|SUITE|COMPONENT|ARCH|/absolute/TRUSTED_KEYRING.gpg` contexts;
+quote each complete argument to protect the pipe characters. A trusted
+operator keyring is required and the scanner does not consult host APT sources.
+Successful bounded signed DEB acquisition writes an
+`acquisitions/<key>.deb-replay.json` descriptor alongside its receipt.
+If a later scan has a different query set, repeat `--native-deb-replay
+/absolute/path/to/<key>.deb-replay.json` for up to four earlier descriptors.
+Keep the corresponding `--native-deb-repositories` values in the launch:
+a descriptor cannot grant signing trust. Replay rechecks the original
+signed indexes or package archives and uses only matching queries from the
+current scan. It reads external caches without fetching or updating them.
+Executable ownership requires the literal name recorded in the signed
+inventory. Two signed artifacts at the same package version remain separate
+when their package SHA-256 differs; byte-identical sightings can be merged.
+Project config and environment variables cannot select a replay descriptor.
+
+For AMD's XRT PPA, if the signed archive has no Contents index, the scanner
+can join the signed Packages index to the verified package's file inventory
+for requested XRT and AIEBU tools. `--native-mlir-aie-wheel` takes an exact
+`VERSION:WHEEL-TAG`, for example `1.4.4:cp312-cp312-manylinux_2_35_x86_64`.
+When `aie-hsaco` is requested, the scanner checks that release's published
+asset digest and reads its console-script metadata without installing it.
 `--native-apple-sdks` supplies `owner/repository@COMMIT:SDK.sdk`;
 `--native-cuda-release` and `--native-cuda-platforms` identify the published
 redistributable release and artifact platforms. Minimum version constraints
 never authorize a guessed latest release. The tool derives individual requests
 from discovered requirements; no handwritten component inventory is required.
+
+For a literal `find_program(... NAMES ... NO_DEFAULT_PATH)` search, a
+distribution executable's recorded parent directory must match a search
+directory or an explicit `PATH_SUFFIXES` directory. A private prefix that
+only ends in the requested directory does not qualify. This check does not
+infer unresolved search roots or select a build provider.
 
 Acquisition records are emitted as `cdx:native:acquisition`. A downloaded owner
 version remains separate from interface compatibility and build selection.
@@ -583,6 +646,13 @@ cached sources: compatible alternatives can replace consumer placeholders,
 while excluded alternatives retain their owner identity and restore unresolved
 consumer requirements. Cold and warm generation preserve occurrence guards and
 dependency references; acquisition never selects a build provider.
+
+For a literal `ExternalProject_Add` whose options establish a separate,
+default CMake configure, an authenticated source snapshot can supply a
+`cmake-config-install-contract` for the original guarded declaration.
+This records matching config-generation and install rules, not a generated
+file, installed archive, or selected provider. Custom, disabled, or
+ambiguous configure steps are not treated as standalone CMake.
 
 
 Additional frozen provider inventories are read through
@@ -614,6 +684,10 @@ by its own project and export metadata. Neither is inferred from a directory
 name alone. Versioned artifact variants retain separate identities through
 final BOM assembly, even when they share a package URL. Unversioned requests
 still deduplicate normally while preserving all occurrence provenance.
+An owner-shipped CMake config in `lib/cmake/<project>` can establish a
+source-owned alternative without proving that it was configured, installed,
+or selected. A literal `find_program(NAMES … PATHS … NO_DEFAULT_PATH)`
+search excludes authenticated package paths proved to be outside those roots.
 
 Cached exports are sourced only after their manifest, metadata and member/file
 ownership evidence is authenticated. The native index verifies each cited
