@@ -670,6 +670,15 @@ and owned file inventories. Apple framework versions come from explicit owning
 linker metadata, not an SDK release or deployment target; literal linker
 versions such as `0` remain distinguishable from an absent version.
 
+If a checksummed data download has moved, admit an explicit mirror with
+`bun contrib/native-download-cache.js --url ORIGINAL_HTTPS_URL --cache EXTERNAL_DIR
+--source-root SOURCE_DIR --type data --hash ALGORITHM=HEX --mirror-url MIRROR_HTTPS_URL
+--allowed-hosts ORIGINAL_HOST,MIRROR_HOST`. Use the checksum declared in source.
+The producer checks those exact bytes, records the mirror as transport
+evidence, and leaves the declared URL as the artifact identity. Reuse the
+cache with `cdxgen --native-source-cache EXTERNAL_DIR --no-native-acquire`:
+the SHA-256 is an artifact revision, not a software version.
+
 Available providers are alternatives, not a claim about which dependency an
 original build selected. Checked-out source and cached external providers are
 evaluated independently for the same occurrence; a matching external provider

@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, readSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { gunzipSync } from "node:zlib";
 import { Parser as TarParser } from "tar";
 import StreamZip from "node-stream-zip";
 
 import { openRegularFile, readRegularTextFile } from "../lib/core/boundedFile.js";
 import { acquireNativeArchiveIdentity, nativeDeclaredArchiveFiles, nativeDeclaredArchiveOwner } from "../lib/ecosystems/nativeArchiveIdentity.js";
+import { nativeDownloadCacheKey } from "../lib/ecosystems/nativeDownloadSources.js";
 import { parseCmakeLikeFile } from "../lib/ecosystems/parsers-misc.js";
 import { fetchNativeAcquisitionBytes, nativeAcquisitionRemaining, nativeAcquisitionUrl } from "./native-acquisition-policy.js";
 import { nativeProviderCacheWriter } from "./native-provider-cache.js";
@@ -139,11 +141,26 @@ function ensureCacheDirectory(directory) {
 
 /** Explicit bounded acquisition, shared by the normal CLI and standalone tool.
  * A declared checksum authenticates generic archives before any interpretation. */
-export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, name, allowedHosts, localArtifact, deadline = Date.now() + 300000 }) {
+export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, name, allowedHosts, localArtifact, artifactType, mirrorUrl, deadline = Date.now() + 300000 }) {
   nativeAcquisitionRemaining(deadline);
   const root = externalCache(sourceRoot, cache);
   const original = new URL(url);
   if (original.protocol !== "https:" || original.username || original.password || original.hash || original.search) throw new Error("An explicit credential-free HTTPS artifact URL is required");
+  const pinnedData = artifactType === "data" && Boolean(urlHash);
+  const algorithms = { SHA256: ["sha256", 64], SHA512: ["sha512", 128], SHA384: ["sha384", 96], SHA224: ["sha224", 56], SHA1: ["sha1", 40], MD5: ["md5", 32],
+    SHA3_256: ["sha3-256", 64], SHA3_384: ["sha3-384", 96], SHA3_512: ["sha3-512", 128] };
+  const [algorithm, expected, extraPin] = (urlHash || "").split("=");
+  const selected = algorithms[algorithm?.toUpperCase()];
+  if (urlHash && (!selected || extraPin !== undefined || expected?.length !== selected[1] || !/^[a-f0-9]+$/i.test(expected))) {
+    throw new Error("Unsupported or unresolved declared archive checksum");
+  }
+  const declaredHash = urlHash ? `${algorithm.toUpperCase()}=${expected.toLowerCase()}` : undefined;
+  if (mirrorUrl !== undefined) {
+    if (!pinnedData || localArtifact !== undefined) throw new Error("A mirror requires a data artifact and its declared checksum");
+    nativeAcquisitionUrl(original, allowedHosts);
+    const mirror = nativeAcquisitionUrl(mirrorUrl, allowedHosts);
+    if (mirror.search) throw new Error("An explicit mirror URL cannot include query parameters");
+  }
   if (localArtifact !== undefined) {
     if (!urlHash) throw new Error("A declared checksum is required to import a local download artifact");
     nativeAcquisitionUrl(original, allowedHosts);
@@ -151,7 +168,7 @@ export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, nam
   const writer = nativeProviderCacheWriter(root, sourceRoot);
   ensureCacheDirectory(join(root, "downloads")); ensureCacheDirectory(join(root, "download-artifacts"));
   writer.mkdir("downloads"); writer.mkdir("download-artifacts");
-  const key = createHash("sha256").update(JSON.stringify([original.href])).digest("hex");
+  const key = nativeDownloadCacheKey(original.href, pinnedData ? declaredHash : undefined);
   let prior;
   try { prior = JSON.parse(readRegularTextFile(join(root, "downloads", `${key}.json`), 128 * 1024, root) || "null"); } catch { /* No trusted URL record. */ }
   let bytes; let finalUrl; let redirectChain;
@@ -160,28 +177,37 @@ export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, nam
     bytes = readDownloadBytes(input, dirname(input));
     if (!bytes) throw new Error("Local download artifact is missing, unsafe or exceeds the byte limit");
     finalUrl = original.href; redirectChain = [original.href];
-  } else if (prior?.schema === 1 && prior.url === url && /^[a-f0-9]{64}$/.test(prior.sha256 || "") && prior.artifact === `download-artifacts/${prior.sha256}`) {
+  } else if (mirrorUrl === undefined && prior?.schema === 1 && prior.url === url &&
+    prior.declaredHash === (pinnedData ? declaredHash : undefined) &&
+    /^[a-f0-9]{64}$/.test(prior.sha256 || "") && prior.artifact === `download-artifacts/${prior.sha256}`) {
     const retained = readDownloadBytes(join(root, prior.artifact), root);
     if (retained && createHash("sha256").update(retained).digest("hex") === prior.sha256) {
       bytes = retained; finalUrl = prior.transportUrl || prior.resolvedUrl;
       redirectChain = Array.isArray(prior.redirectChain) ? prior.redirectChain : [url, prior.resolvedUrl];
     }
   }
-  if (!bytes) ({ bytes, resolvedUrl: finalUrl, redirectChain } = await fetchNativeAcquisitionBytes(url, { allowedHosts, deadline, maximum: MAX_BYTES }));
+  if (!bytes) ({ bytes, resolvedUrl: finalUrl, redirectChain } = await fetchNativeAcquisitionBytes(mirrorUrl || url, { allowedHosts, deadline, maximum: MAX_BYTES }));
   nativeAcquisitionRemaining(deadline);
   const releaseUrl = redirectChain.find((location) => githubReleaseIdentity(location));
   const identityUrl = releaseUrl || (new URL(finalUrl).search ? original.href : finalUrl);
-  const algorithms = { SHA256: ["sha256", 64], SHA512: ["sha512", 128], SHA384: ["sha384", 96], SHA224: ["sha224", 56], SHA1: ["sha1", 40], MD5: ["md5", 32],
-    SHA3_256: ["sha3-256", 64], SHA3_384: ["sha3-384", 96], SHA3_512: ["sha3-512", 128] };
-  const [algorithm, expected] = (urlHash || "").split("=");
-  if (urlHash) {
-    const selected = algorithms[algorithm?.toUpperCase()];
-    if (!selected || expected?.length !== selected[1] || !/^[a-f0-9]+$/i.test(expected)) throw new Error("Unsupported or unresolved declared archive checksum");
-    if (createHash(selected[0]).update(bytes).digest("hex") !== expected.toLowerCase()) throw new Error("Declared archive hash mismatch");
-  }
+  if (urlHash && createHash(selected[0]).update(bytes).digest("hex") !== expected.toLowerCase()) throw new Error("Declared archive hash mismatch");
+  if (pinnedData && !bytes.length) throw new Error("The checksum-pinned data artifact is empty");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   const artifact = `download-artifacts/${sha256}`;
   writer.write(artifact, bytes);
+  const recordFile = join(root, "downloads", `${key}.json`);
+  const provenance = {
+    schema: 1, url: original.href, resolvedUrl: pinnedData ? original.href : identityUrl,
+    transportUrl: finalUrl.split("?")[0], redirectChain: redirectChain.map((location) => location.split("?")[0]),
+    observedAt: new Date().toISOString(), sha256, md5: selected?.[0] === "md5" ? expected.toLowerCase() :
+      createHash("md5").update(bytes).digest("hex"), bytes: bytes.length, artifact,
+  };
+  if (pinnedData) {
+    const record = { ...provenance, name: name || basename(original.pathname), type: "data",
+      declaredHash, evidence: [`Declared data checksum ${declaredHash}`, `Data transport: ${provenance.transportUrl}`] };
+    writer.write(`downloads/${key}.json`, `${JSON.stringify(record, null, 2)}\n`);
+    return { recordFile, ...record };
+  }
   const file = join(root, artifact);
   const prefix = bytes.subarray(0, MAX_PREFIX).toString("utf8");
   const installer = inspectInstallerHeader(prefix);
@@ -251,11 +277,9 @@ export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, nam
   }
   if (!release && !installer && !isa && !identity && !archiveVersion) prerequisite ||= "Original artifact acquired, but an authenticated owner release/interface remains an external metadata prerequisite";
   const record = {
-    schema: 1, url: original.href, resolvedUrl: identityUrl,
-    transportUrl: finalUrl.split("?")[0], redirectChain: redirectChain.map((location) => location.split("?")[0]),
-    observedAt: new Date().toISOString(), sha256, md5: createHash("md5").update(bytes).digest("hex"), bytes: bytes.length,
+    ...provenance,
     name: installer?.name || archiveName || release?.name || name || "machine-readable-isa",
-    type: isa ? "data" : installer ? "application" : "library", artifact,
+    type: isa ? "data" : installer ? "application" : "library",
     ...(prerequisite ? { prerequisite } : {}),
     ...(release ? { releaseTag: release.tag } : {}),
     ...(installer ? { artifactVersion: installer.version, artifactVersionSource: installer.source } : {}),
@@ -266,21 +290,21 @@ export async function cacheNativeDownload({ url, cache, sourceRoot, urlHash, nam
       ...(prerequisite ? [`Original artifact SHA256 ${sha256}; owner release remains unresolved`] : []),
       ...(identity || archiveVersion ? [`Declared archive SHA256 ${sha256}; owner metadata release ${archiveVersion || identity.version}`] : []), ...(isa || [])],
   };
-  const recordFile = join(root, "downloads", `${key}.json`);
   writer.write(`downloads/${key}.json`, `${JSON.stringify(record, null, 2)}\n`);
   return { recordFile, ...record, providerManifest, archiveVersion: archiveVersion || identity?.version };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2);
-  const value = (flag) => args[args.indexOf(flag) + 1];
-  if (!["--url", "--cache", "--source-root"].every((flag) => args.includes(flag) && value(flag))) {
-    console.error("Usage: bun contrib/native-download-cache.js --url HTTPS_URL --cache EXTERNAL_DIR --source-root SOURCE_DIR");
-    process.exitCode = 1;
-  } else {
-    try {
-      const record = await cacheNativeDownload({ url: value("--url"), cache: value("--cache"), sourceRoot: value("--source-root") });
-      console.log(JSON.stringify({ recordFile: record.recordFile, name: record.name, type: record.type, releaseTag: record.releaseTag, artifactVersion: record.artifactVersion, sha256: record.sha256 }));
-    } catch (error) { console.error(error.message); process.exitCode = 1; }
-  }
+  try {
+    const { values } = parseArgs({ options: {
+      url: { type: "string" }, cache: { type: "string" }, "source-root": { type: "string" },
+      type: { type: "string" }, hash: { type: "string" }, "mirror-url": { type: "string" }, "allowed-hosts": { type: "string" },
+    } });
+    if (!values.url || !values.cache || !values["source-root"] || values.type && values.type !== "data") {
+      throw new Error("Usage: bun contrib/native-download-cache.js --url HTTPS_URL --cache EXTERNAL_DIR --source-root SOURCE_DIR [--type data --hash ALGORITHM=HEX --mirror-url HTTPS_MIRROR --allowed-hosts HOSTS]");
+    }
+    const record = await cacheNativeDownload({ url: values.url, cache: values.cache, sourceRoot: values["source-root"],
+      artifactType: values.type, urlHash: values.hash, mirrorUrl: values["mirror-url"], allowedHosts: values["allowed-hosts"] });
+    console.log(JSON.stringify({ recordFile: record.recordFile, name: record.name, type: record.type, releaseTag: record.releaseTag, artifactVersion: record.artifactVersion, sha256: record.sha256 }));
+  } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

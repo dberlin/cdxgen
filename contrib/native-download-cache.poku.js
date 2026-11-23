@@ -115,3 +115,51 @@ await test("pinned CPack installer proves package release and exact executable p
     assert.match(invalid.prerequisite, /CPack.*payload/);
   } finally { globalThis.fetch = original; rmSync(root, { recursive: true, force: true }); }
 });
+
+await test("a pinned data mirror preserves the declared URL and verifies the bytes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cdxgen-data-mirror-"));
+  const source = join(root, "source");
+  const cache = join(root, "cache");
+  mkdirSync(source);
+  const url = "https://original.example/samples/trace.dat";
+  const mirrorUrl = "https://mirror.example/archived/trace.data";
+  const bytes = Buffer.from("historical trace bytes\n");
+  const urlHash = `MD5=${createHash("md5").update(bytes).digest("hex")}`;
+  const options = { url, mirrorUrl, sourceRoot: source, cache, artifactType: "data",
+    allowedHosts: "original.example,mirror.example" };
+  const original = globalThis.fetch;
+  const requested = [];
+  const laterBytes = Buffer.from("different historical data at the same URL\n");
+  const laterHash = `SHA256=${createHash("sha256").update(laterBytes).digest("hex")}`;
+  const laterMirror = "https://mirror.example/later/trace.data";
+  try {
+    globalThis.fetch = async (location) => {
+      requested.push(String(location));
+      return new Response(String(location) === laterMirror ? laterBytes :
+        String(location) === url ? "#!/bin/sh\n# NAME: tool\n# VER: 2.4.6\n" : bytes);
+    };
+    await assert.rejects(cacheNativeDownload(options), /checksum/);
+    await assert.rejects(cacheNativeDownload({ ...options, urlHash, artifactType: "library" }), /data/);
+    assert.deepEqual(requested, []);
+    await assert.rejects(cacheNativeDownload({ ...options, urlHash: `MD5=${"a".repeat(32)}` }), /hash mismatch/);
+    assert.equal(nativeDownloadIdentity(url, cache, source, urlHash), undefined);
+    const result = await cacheNativeDownload({ ...options, urlHash });
+    assert.deepEqual(requested, [mirrorUrl, mirrorUrl]);
+    assert.equal(result.transportUrl, mirrorUrl);
+    assert.equal(result.resolvedUrl, url);
+    assert.equal(result.providerManifest, undefined);
+    assert.equal(nativeDownloadIdentity(url, cache, source), undefined,
+      "mirror evidence for one pinned declaration must not qualify an unpinned download");
+    const identity = nativeDownloadIdentity(url, cache, source, urlHash);
+    assert.equal(identity.name, "trace.dat");
+    assert.equal(identity.type, "data");
+    assert.equal(identity.sha256, createHash("sha256").update(bytes).digest("hex"));
+    assert.ok(identity.evidence.some((item) => item.includes(mirrorUrl)));
+
+    await cacheNativeDownload({ url, cache, sourceRoot: source, allowedHosts: options.allowedHosts });
+    await cacheNativeDownload({ ...options, mirrorUrl: laterMirror, urlHash: laterHash });
+    assert.equal(nativeDownloadIdentity(url, cache, source)?.version, "2.4.6");
+    assert.equal(nativeDownloadIdentity(url, cache, source, urlHash)?.sha256, identity.sha256);
+    assert.equal(nativeDownloadIdentity(url, cache, source, laterHash.toUpperCase())?.sha256, laterHash.slice(7));
+  } finally { globalThis.fetch = original; rmSync(root, { recursive: true, force: true }); }
+});
