@@ -116,6 +116,15 @@
     "bin/",
     "!bin/*.poku.js",
     "!lib/**/*.poku.js",
+    "contrib/native-acquisition-policy.js",
+    "contrib/native-source-cache.js",
+    "contrib/native-download-cache.js",
+    "contrib/native-provider-cache.js",
+    "contrib/native-provider-artifacts.js",
+    "contrib/native-provider-process.js",
+    "contrib/native-rpm-provider-cache.js",
+    "contrib/native-apple-provider-cache.js",
+    "contrib/native-cuda-provider-cache.js",
     "!lib/third-party/arborist/snapshots/",
     "data/",
     "types/",
@@ -160,6 +169,7 @@
     "node-stream-zip": "1.16.0",
     "npm-package-arg": "14.0.0",
     "parse-conflict-json": "6.0.0",
+    "path-scurry": "2.0.2",
     "semver": "7.8.5",
     "smol-toml": "1.9.1",
     "ssri": "14.0.0",
@@ -223,5 +233,11 @@
         "onFail": "ignore"
       }
     ]
+  },
+  "overrides": {
+    "iconv-lite": "0.7.2",
+    "yargs": "18.2.0",
+    "type-detect": "4.1.0",
+    "on-finished": "2.4.1"
   }
 }

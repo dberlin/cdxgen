@@ -1,3 +1,4 @@
+import type { Buffer } from "node:buffer";
 /**
  * Git executable name used for all git invocations, overridable via GIT_CMD.
  *
@@ -59,6 +60,14 @@ export declare function listFiles(dir: string): any[];
  * @returns Output from the git command
  */
 export declare function execGitCommand(dir: string, args: any[]): string | undefined;
+/** Status-aware hardened read-only Git metadata query; never use for Git writes. */
+export declare function execGitMetadata(dir: string, args: string[]): {
+    status: number | null;
+    stdout?: string | Buffer;
+    stderr?: string | Buffer;
+    error?: Error;
+    signal?: NodeJS.Signals | null;
+};
 /**
  * Retrieves the author names and emails from the git commit log
  *

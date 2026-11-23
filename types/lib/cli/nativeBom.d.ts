@@ -57,9 +57,9 @@ export declare function createDartBom(path: string, options: Object): Promise<Ob
  *
  * @param {string} path to the project
  * @param {Object} options Parse options from the cli
- * @returns {Object} BOM object
+ * @returns {Promise<Object>} BOM object
  */
-export declare function createCppBom(path: string, options: Object): Object;
+export declare function createCppBom(path: string, options: Object): Promise<Object>;
 /**
  * Function to create bom string for clojure projects
  *

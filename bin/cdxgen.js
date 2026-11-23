@@ -33,6 +33,7 @@ import {
   INTROSPECTION_FAILURE_EXIT_CODE,
   isDeferredFailOnError,
 } from "../lib/core/deferredExit.js";
+import { safeWriteChunksSync, setDirWalkCacheRoot } from "../lib/core/fs.js";
 import { TRACE_MODE, thoughtEnd, thoughtLog } from "../lib/core/logger.js";
 import { resolveSourcePathArgument } from "../lib/core/pluginRun.js";
 import {
@@ -83,6 +84,7 @@ import {
   createOutputPlan,
   getOutputDirectory,
 } from "../lib/helpers/exportUtils.js";
+import { jsonOutputChunks, writeJsonToStream } from "../lib/helpers/jsonOutput.js";
 import {
   DEFAULT_CDX_SPEC_VERSION,
   getSupportedCycloneDxComponentTypes,
@@ -253,6 +255,12 @@ const args = _yargs
     description:
       "Recurse mode suitable for mono-repos. Defaults to true. Pass --no-recurse to disable.",
   })
+  .option("immutable-source", {
+    type: "boolean",
+    default: false,
+    description:
+      "Reuse directory discovery for a single source root guaranteed unchanged throughout the scan (for example a read-only snapshot).",
+  })
   .option("print", {
     alias: "p",
     type: "boolean",
@@ -272,6 +280,11 @@ const args = _yargs
     type: "string",
     description:
       "Path to the CMakeCache.txt of a configured C/C++ build. Overrides the lookup in the build directories of the CMake presets, build*/, out/, builddir/ and cmake-build-*/.",
+  })
+  .option("native-dependency-facts", {
+    type: "string",
+    description:
+      "Read configuration-scoped CMake/Meson provider facts captured outside the source tree. Stale or foreign facts are ignored; this option never configures or installs dependencies.",
   })
   .option("compile-commands", {
     type: "string",
@@ -446,6 +459,45 @@ const args = _yargs
     default: !isSecureMode,
     description:
       "Install dependencies automatically for some projects. Defaults to true but disabled for containers and oci scans. Use --no-install-deps to disable this feature.",
+  })
+  .option("native-version-probes", {
+    type: "boolean",
+    default: false,
+    description:
+      "Query supported installed native-library APIs in a read-only, network/PID-isolated sandbox. Requires project-tooling permission; unavailable probes remain unresolved.",
+  })
+  .option("native-acquire", {
+    type: "boolean",
+    default: false,
+    description: "Permit bounded acquisition of exact discovered native source/provider metadata into an operator-configured external cache. No source builds or package installs.",
+  })
+  .option("native-source-cache", {
+    type: "string",
+    description: "External native evidence cache; consumed passively offline. Only launch arguments/environment can configure acquisition writes.",
+  })
+  .option("native-acquire-hosts", {
+    type: "string",
+    description: "Comma-separated exact HTTPS acquisition host allowlist, including redirect destinations. Defaults to supported public producer origins.",
+  })
+  .option("native-registry-revision", {
+    type: "string",
+    description: "Exact immutable vcpkg registry commit for discovered provider requests; no latest registry revision is inferred.",
+  })
+  .option("native-rpm-repositories", {
+    type: "string",
+    description: "Comma-separated fedora=HTTPS_BASE,updates=HTTPS_BASE exact-release RPM metadata contexts. Host DNF repositories are never used.",
+  })
+  .option("native-apple-sdks", {
+    type: "string",
+    description: "Comma-separated owner/repository@COMMIT:SDK.sdk exact Apple SDK/platform contexts for discovered frameworks.",
+  })
+  .option("native-cuda-release", {
+    type: "string",
+    description: "Exact published CUDA redistributable release context. Minimum constraints never select a guessed release.",
+  })
+  .option("native-cuda-platforms", {
+    type: "string",
+    description: "Comma-separated exact NVIDIA artifact target platforms (for example linux-x86_64).",
   })
   .option("package-extensions", {
     type: "boolean",
@@ -1536,6 +1588,18 @@ const stringifyJson = (jsonPayload, jsonPretty) =>
     ? jsonPayload
     : JSON.stringify(jsonPayload, null, jsonPretty ? 2 : null);
 
+const writeJsonFile = (file, payload, pretty) =>
+  safeWriteChunksSync(file, typeof payload === "string" || payload instanceof String ?
+    [String(payload)] : jsonOutputChunks(payload, pretty), { atomic: false });
+
+const writeJsonStdout = async (payload, pretty) => {
+  if (typeof payload === "string" || payload instanceof String) {
+    process.stdout.write(String(payload));
+  } else {
+    await writeJsonToStream(process.stdout, payload, pretty);
+  }
+};
+
 const SIGNING_HINT =
   "Check that the private key is in PEM format and that SBOM_SIGN_ALGORITHM matches its key type.";
 
@@ -1701,14 +1765,19 @@ const reportSigningFailure = (signingError, target) => {
 };
 
 const writeCycloneDxOutput = (jsonFile, bomJson, options) => {
-  const result = signForOutput(
-    bomJson,
-    stringifyJson(bomJson, options.jsonPretty),
-    dirname(jsonFile),
-    jsonFile,
-    options,
-  );
-  safeWriteSync(jsonFile, result.jsonPayload);
+  let result = { bomJson };
+  if (needsBomSigning(options)) {
+    result = signForOutput(
+      bomJson,
+      stringifyJson(bomJson, options.jsonPretty),
+      dirname(jsonFile),
+      jsonFile,
+      options,
+    );
+    safeWriteSync(jsonFile, result.jsonPayload);
+  } else {
+    writeJsonFile(jsonFile, bomJson, options.jsonPretty);
+  }
   if (jsonFile.endsWith("bom.json")) {
     thoughtLog(
       `Let's save the file to "${jsonFile}". Should I suggest the '.cdx.json' file extension for better semantics?`,
@@ -1968,6 +2037,9 @@ const writeCycloneDxOutput = (jsonFile, bomJson, options) => {
   // Add extra metadata and annotations with post processing
   {
     const postPhase = defaultUi.phase("Post-processing BOM");
+    const cachePostProcessing = options.immutableSource === true &&
+      typeof srcDir === "string" && !srcDir.includes(",");
+    if (cachePostProcessing) setDirWalkCacheRoot(srcDir);
     try {
       bomNSData = await postProcess(
         bomNSData,
@@ -1978,6 +2050,8 @@ const writeCycloneDxOutput = (jsonFile, bomJson, options) => {
     } catch (err) {
       postPhase.fail(err);
       throw err;
+    } finally {
+      if (cachePostProcessing) setDirWalkCacheRoot(undefined);
     }
   }
   setActivityContext({
@@ -2167,10 +2241,7 @@ const writeCycloneDxOutput = (jsonFile, bomJson, options) => {
         target: internalCycloneDxInputPath,
       });
     } else {
-      safeWriteSync(
-        internalCycloneDxInputPath,
-        stringifyJson(bomNSData.bomJson, options.jsonPretty),
-      );
+      writeJsonFile(internalCycloneDxInputPath, bomNSData.bomJson, options.jsonPretty);
     }
   }
   // Evidence generation
@@ -2321,9 +2392,10 @@ const writeCycloneDxOutput = (jsonFile, bomJson, options) => {
   }
   if (outputIsStdout) {
     if (!isDryRun && bomNSData.bomJson) {
-      let payload;
       if (outputPlan.formats.has("spdx") && bomNSData.spdxJson) {
-        payload = stringifyJson(bomNSData.spdxJson, options.jsonPretty);
+        await writeJsonStdout(bomNSData.spdxJson, options.jsonPretty);
+      } else if (!needsBomSigning(options)) {
+        await writeJsonStdout(bomNSData.bomJson, options.jsonPretty);
       } else {
         const result = signForOutput(
           bomNSData.bomJson,
@@ -2340,9 +2412,8 @@ const writeCycloneDxOutput = (jsonFile, bomJson, options) => {
           process.exit(1);
         }
         bomNSData.bomJson = result.bomJson;
-        payload = result.jsonPayload;
+        process.stdout.write(result.jsonPayload);
       }
-      process.stdout.write(payload);
     } else if (isDryRun) {
       recordActivity({
         kind: "write",
@@ -2372,7 +2443,7 @@ const writeCycloneDxOutput = (jsonFile, bomJson, options) => {
       bomNSData.bomJson = result.bomJson;
       if (bomNSData.nsMapping && Object.keys(bomNSData.nsMapping).length) {
         const nsFile = `${outputPlan.outputs.cyclonedx}.map`;
-        safeWriteSync(nsFile, JSON.stringify(bomNSData.nsMapping));
+        writeJsonFile(nsFile, bomNSData.nsMapping, false);
       }
     } else if (isDryRun && outputPlan.outputs.cyclonedx) {
       recordActivity({
@@ -2383,10 +2454,7 @@ const writeCycloneDxOutput = (jsonFile, bomJson, options) => {
       });
     }
     if (!isDryRun && outputPlan.outputs.spdx && bomNSData.spdxJson) {
-      safeWriteSync(
-        outputPlan.outputs.spdx,
-        stringifyJson(bomNSData.spdxJson, options.jsonPretty),
-      );
+      writeJsonFile(outputPlan.outputs.spdx, bomNSData.spdxJson, options.jsonPretty);
       thoughtLog(`Let's save the SPDX file to "${outputPlan.outputs.spdx}".`);
     } else if (isDryRun && outputPlan.outputs.spdx) {
       recordActivity({
@@ -2398,7 +2466,11 @@ const writeCycloneDxOutput = (jsonFile, bomJson, options) => {
     }
   } else if (!options.print) {
     if (outputPlan.formats.has("spdx") && bomNSData?.spdxJson) {
-      console.log(stringifyJson(bomNSData.spdxJson, options.jsonPretty));
+      await writeJsonStdout(bomNSData.spdxJson, options.jsonPretty);
+      process.stdout.write("\n");
+    } else if (bomNSData.bomJson && !needsBomSigning(options)) {
+      await writeJsonStdout(bomNSData.bomJson, options.jsonPretty);
+      process.stdout.write("\n");
     } else if (bomNSData.bomJson) {
       const result = signForOutput(
         bomNSData.bomJson,

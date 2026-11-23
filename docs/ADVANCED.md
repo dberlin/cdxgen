@@ -209,6 +209,38 @@ cdxgen discovers embedded SBOMs in installed distributions (`site-packages/<dist
 
 The embedded data is untrusted third-party input: cdxgen bounds its size (documents larger than 5 MiB are skipped), never follows references out of it, validates the shape before merging, and skips an invalid document with a warning rather than failing the run.
 
+An installed embedded component whose reference explicitly represents an
+unresolved `requires-dist:` requirement can be bound to exact distribution
+metadata in the **same** `site-packages`/`dist-packages` directory. The requirement
+must also appear in the carrying distribution's `METADATA`, and the installed
+version must satisfy it. Supported numeric constraints and simple active
+`python_version` markers are checked conservatively; inactive branches,
+unsupported expressions, foreign environments and wheel-only documents are not
+given guessed versions. `cdx:embeddedSbom:resolvedRequirement` and
+`cdx:pypi:installedMetadata` retain this provenance, and graph references are
+rebased to the installed identity.
+
+For versionless tracked npm source/workspace manifests, the actual checkout's
+commit can identify the source snapshot. These components are explicitly tagged
+`cdx:version:kind=source-revision`; the commit is not a registry release. Product
+version overrides apply to the scan root, not every nested package.
+
+Source hierarchy and lockfile sightings of the same component share one
+declaration: source-manifest classification and nesting are retained, and
+complementary lock evidence and metadata are merged without changing graph IDs.
+Conflicting identities sharing an ID are rejected rather than silently selected.
+
+### Source-revision metadata snapshots
+
+For source components whose version is an observed Git revision, cdxgen queries HEAD, origin and tracked paths once per owning repository during a BOM generation, then checks cleanliness lazily within each requested component directory. Repeated requests for that same subtree reuse the observed result. This in-memory snapshot preserves nearest nested-repository ownership and exact tracked-manifest membership: changes anywhere below a component's directory prevent assigning that checkout revision, while unrelated dirty sibling projects do not. Staged changes, deleted files, both sides of renames, merge conflicts and dirty submodules are included. Failed or incomplete Git queries leave revision evidence unresolved rather than treating the repository as clean.
+
+The snapshot is cleared by the existing generation reset used by long-lived callers. It is also invalidated before cdxgen runs external tools that may change tracked inputs, including installers and build helpers; internal hardened read-only Git metadata probes do not invalidate themselves. Keep tracked source inputs and Git configuration fixed while analysis runs. Edits made concurrently outside cdxgen are not a live-consistency guarantee and are observed when the next generation starts.
+
+Configured nonempty Git clean/process filter commands conservatively prevent source-revision fallback rather than executing repository-controlled filters during metadata inspection. The guard includes initialized submodules inside the requested subtree, including nested submodules. Explicit declared component versions are unaffected.
+
+This optimization does not persist source analysis or finished BOMs, does not skip required directory discovery, and does not promise to touch only changed files. It is separate from the registry disk cache and from directory-walk reuse for immutable container root filesystems. No source repository cache files are written.
+
+
 ## TEA — Transparency Exchange API
 
 The [Transparency Exchange API](https://github.com/CycloneDX/transparency-exchange-api) (ECMA TC54 TG1) is a standard for exchanging transparency artefacts (SBOMs, VEX, attestations) between systems. The consumer API is the current conformance base (spec version 0.4.0); the publisher API exists as a **draft recommendation** in `spec/publisher/` and is subject to change.
@@ -1034,6 +1066,12 @@ When `--server-url` is set, the notice names the server the formulation will be 
 
 Formulation is not what satisfies the generation context element of the CISA 2026 minimum elements: `CISA-MIN-004` reads `metadata.lifecycles`, which cdxgen fills without formulation.
 
+When a pinned CI action is also found by source inventory, its canonical
+declaration lives in formulation with both sets of provenance and tags.
+Dependency and workflow references keep their original identifiers. Annotation
+tool descriptions omit the optional inline `bom-ref`; the tool's unique
+declaration remains in `metadata.tools`.
+
 - git metadata such as files in the tree, origin url, branch, and CI environment variables (a URL in an environment value keeps only its scheme, host and path; userinfo, query string and fragment are removed)
 - build tools versions (Java, Python, Node.js, gcc, dotnet, rustc, Go, Ruby, RubyGems, Bundler, PHP and Composer)
 - build inputs cdxgen can read without running a build: `Cargo.toml` (build dependencies, build-script capabilities), make and CMake files (target, include and variable names), `go.mod` (module, toolchain), pip requirements and constraints files, and .NET `project.assets.json` restore output and `.csproj` files. Go binaries are read by the binary/OBOM path through the bounded buildinfo reader, not by formulation. Build files larger than 2 MB (32 MB for `project.assets.json`) are skipped without being read, lines longer than 4096 characters are ignored, and the file search honours `--exclude`. Each build-input component records its file relative to the scanned directory; a build file that is a symlink, or resolves outside that directory, is not read. OS inventories (`-t os` and the `obom` command) skip this discovery and the CI and README scans, because their path is usually a home directory or `/` rather than a project.
@@ -1369,6 +1407,53 @@ If you are still undecided, use this order.
 2. switch to a language-specific image only if runtime alignment clearly matters
 3. switch to `secure` or `deno` if the environment requires that permission model
 4. switch to Alpine only after confirming native-dependency behavior is acceptable
+
+## Installed Python requirements and native-library versions
+
+Installed PEP 770 requirements are interpreted only against their carrying
+distribution's scanned Python environment. A supported `python_version`
+marker proven false is retained as JSON `cdx:pypi:inactiveRequirement` on the
+owning distribution rather than emitted as an installed versionless package.
+Independent references and still-needed nested definitions are retained.
+The environment must have a conventional installed-site layout and matching
+`pyvenv.cfg`; an arbitrary enclosing virtual environment is not evidence.
+Unknown markers, compound expressions, extras and unsupported specifiers stay
+unresolved. Versions are never borrowed from another installed environment.
+
+`--native-version-probes` (default `false`, library option
+`nativeVersionProbes`) permits the narrowly supported installed zlib-ng API
+probe after static metadata lookup. It also requires existing project-tooling
+permission. Outside secure mode, a local invocation is:
+
+```sh
+bun bin/cdxgen.js -t c /environment/lib/pythonX.Y/site-packages/zlib_ng \
+  --native-version-probes --no-install-deps --introspect \
+  -o /outside-source/native.bom.json
+```
+
+Consent must come from the operator's CLI or launch environment
+`CDXGEN_NATIVE_VERSION_PROBES=true`, not project configuration. Explicit
+`--no-native-version-probes` overrides the environment. Direct library callers
+may supply the explicit option, still subject to tooling policy.
+
+Nothing is installed or compiled by this adapter. It requires a single
+same-site, non-symlink distribution owning the exact extension/license through
+verified `RECORD` SHA256 and size metadata. Its compatible existing Python
+runtime directly loads that extension, not package initialization or site
+hooks. `ZLIBNG_RUNTIME_VERSION` and `ZLIBNG_VERSION` identify the native
+release; zlib compatibility values are recorded separately, never substituted
+as the zlib-ng version.
+
+The probe requires Linux, `/usr/bin/bwrap` and usable user/PID/network
+namespaces. It uses read-only runtime/extension mounts, a cleared environment,
+dropped capabilities, a new session, closed inherited descriptors and no home
+or `/proc`. Execution is capped at ten seconds and each output stream at
+16 KiB. Isolation failure, unsupported layouts, invalid output or inconsistent
+native versions remain unknown with no unsandboxed fallback. Successful
+subprocess output is validated as untrusted data.
+
+Audit/introspection annotations describe their annotator's package identity
+without redeclaring the metadata tool's document-unique `bom-ref`.
 
 ## Custom Container Images
 

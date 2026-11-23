@@ -368,7 +368,29 @@ export declare function parseCmakeDotFile(dotFile: string, pkgType: string, opti
  * @param {string} srcFile The CMake file the dependency was read from
  * @returns {Object} The component
  */
-export declare function cmakeFetchDependencyComponent(dep: Object, srcFile: string): Object;
+export declare function cmakeFetchDependencyComponent(dep: Object, srcFile: string, options?: Object): Object | undefined;
+export type MesonWrapPatch = {
+    filename?: string;
+    url?: string;
+    hashes?: Array<{ alg: string; content: string }>;
+    fallbackUrl?: string;
+    directory?: string;
+    diffFiles?: string[];
+};
+export type MesonWrapSource = {
+    file: string;
+    line: number;
+    type?: string;
+    directory?: string;
+    url?: string;
+    fallbackUrl?: string;
+    filename?: string;
+    hashes?: Array<{ alg: string; content: string }>;
+    identity?: { version: string; kind: string };
+    reference?: string;
+    provides?: { [name: string]: string };
+    patch?: MesonWrapPatch;
+};
 /**
  * Read the wrap files of a meson project's subprojects directory: which
  * dependency names each wrap provides, and the version it pins.
@@ -379,15 +401,23 @@ export declare function cmakeFetchDependencyComponent(dep: Object, srcFile: stri
  * version; a git wrap pins a `revision` that is often a version tag.
  *
  * @param {string} subprojectsDir path of the subprojects directory
- * @returns {Map<string, {wrap: string, version: string, source: string, revision?: string}>}
+ * @returns {Map<string, Array<{wrap: string, version?: string, source?: string, revision?: string, declaredSource: MesonWrapSource}>>}
  *   by provided dependency name, lower-case
  */
-export declare function readMesonWraps(subprojectsDir: string): Map<string, {
+export declare function readMesonWraps(subprojectsDir: string): Map<string, Array<{
     wrap: string;
-    version: string;
-    source: string;
+    version?: string;
+    source?: string;
     revision?: string;
-}>;
+    declaredSource: MesonWrapSource;
+}>>;
+export declare function sourceAlternativeExcluded(component: {
+    version?: string;
+    properties?: { name: string; value: string }[];
+}, requirement: {
+    constraints?: string;
+    command?: string;
+}): boolean;
 /**
  * Parse a CMake-like build file (CMakeLists.txt, meson.build, etc.) and extract the
  * parent component and list of dependency packages.
@@ -396,16 +426,20 @@ export declare function readMesonWraps(subprojectsDir: string): Map<string, {
  * `find_file` and `dependency()` directives (CMake command names in any case),
  * and, for CMake files, the dependencies downloaded at configure time by
  * `FetchContent_Declare`, `ExternalProject_Add` and `CPMAddPackage`.
- * Uses the MesonWrapDB to improve name resolution confidence.
+ * Keeps catalog provider candidates separate from consumer-selected identities.
  *
  * @param {string} cmakeListFile Path to the CMake-like build file
  * @param {string} pkgType PackageURL type to assign to extracted packages (e.g. `"generic"`)
  * @param {Object} options CLI options; may contain `projectGroup`, `projectName`, and `projectVersion`
- * @returns {{ parentComponent: Object, pkgList: Object[] }}
+ * @returns {{ parentComponent: Object, pkgList: Object[], projectSource: Object, fileSearches: string[], requirements: Object[], materializeRequirement: (requirement: Object) => Object }}
  */
 export declare function parseCmakeLikeFile(cmakeListFile: string, pkgType: string, options?: Object): {
     parentComponent: Object;
     pkgList: Object[];
+    projectSource: Object;
+    fileSearches: string[];
+    requirements: Object[];
+    materializeRequirement: (requirement: Object) => Object;
 };
 /**
  * Parse an atom C/C++ usage-slice report into per-file package usage data.

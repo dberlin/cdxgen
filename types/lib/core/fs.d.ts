@@ -30,13 +30,15 @@ export declare function safeWriteSync(filePath: string, data: string | Buffer, o
  * large to join into one string first. The chunks go to a temporary file next
  * to the target, which is renamed into place once complete, so a chunk may be
  * read from the file being replaced and a failed write leaves the target as it
- * was.
+ * was. Explicit direct mode instead preserves the target's inode, permissions,
+ * and exact-file write grants; a failed direct write can leave partial content.
  *
  * @param {string} filePath File path to write.
  * @param {Iterable<string|Buffer>} chunks Chunks written in order.
+ * @param {{atomic?: boolean}} [options] Use atomic replacement by default.
  * @returns {void}
  */
-export declare function safeWriteChunksSync(filePath: string, chunks: Iterable<string | Buffer>): void;
+export declare function safeWriteChunksSync(filePath: string, chunks: Iterable<string | Buffer>, options?: { atomic?: boolean }): void;
 /**
  * Permission-aware wrapper around readFileSync that returns undefined instead
  * of throwing. Reads are allowed in dry-run mode, so unlike the write wrappers
@@ -152,6 +154,8 @@ export declare function shellQuoteArgument(arg: string, forWindows?: boolean): s
  * @returns {string} The command line the shell will run
  */
 export declare function joinShellCommand(command: string, args: string[] | undefined, rawShellArgs?: boolean): string;
+/** Changes before external helpers may modify tracked source inputs. */
+export declare function getSourceCommandEpoch(): number;
 /**
  * Safe wrapper around spawnSync that enforces permission checks, injects default
  * options (maxBuffer, encoding, timeout), warns about unsafe Python and pip/uv
@@ -183,6 +187,8 @@ export declare function getAllFiles(dirPath: string, pattern: string, options?: 
  * @param {string|undefined} rootDir Subtree whose contents are fixed for the rest of the scan
  */
 export declare function setDirWalkCacheRoot(rootDir: string | undefined): void;
+/** Whether a path belongs to the current explicitly immutable scan root. */
+export declare function isImmutableSourcePath(dirPath: string | undefined): boolean;
 /**
  * Release every cached directory walk.
  *
