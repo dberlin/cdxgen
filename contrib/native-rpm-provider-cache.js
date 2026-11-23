@@ -24,21 +24,29 @@ function addProgramPaths(paths, requirement) {
   }
 }
 
+function addLibraryQueries(queries, requirement, capabilities = false) {
+  for (const name of [requirement.requestedName, ...(requirement.alternatives || [])]) {
+    if (typeof name !== "string" || !namePattern.test(name)) continue;
+    const library = name.startsWith("lib") ? name : `lib${name}`;
+    if (capabilities) {
+      if (!name.endsWith(".a")) queries.add(`${/\.so(?:\.[0-9]+)*$/.test(library) ? library : `${library}.so`}()(64bit)`);
+    } else if (/\.(?:so(?:\.[0-9]+)*|a)$/.test(name)) queries.add(`*/${name}`);
+    else {
+      queries.add(`*/${library}.so`);
+      queries.add(`*/${library}.a`);
+    }
+  }
+}
+
 /** Discovery syntax determines file patterns; no owner/version alias map. */
 export function nativeRpmFilePatterns(requirements) {
   const patterns = new Set();
   for (const requirement of requirements) {
     if (requirement.command === "find_program") { addProgramPaths(patterns, requirement); continue; }
+    if (requirement.command === "find_library") { addLibraryQueries(patterns, requirement); continue; }
     const name = requirement.requestedName;
     if (typeof name !== "string" || !namePattern.test(name)) continue;
-    if (requirement.command === "find_library") {
-      if (/\.(?:so(?:\.[0-9]+)*|a)$/.test(name)) patterns.add(`*/${name}`);
-      else {
-        const library = name.startsWith("lib") ? name : `lib${name}`;
-        patterns.add(`*/${library}.so`);
-        patterns.add(`*/${library}.a`);
-      }
-    } else if (["dependency", "pkg_check_modules", "pkg_search_module"].includes(requirement.command)) {
+    if (["dependency", "pkg_check_modules", "pkg_search_module"].includes(requirement.command)) {
       patterns.add(`*/${name}.pc`);
     } else if (["find_package", "find_dependency"].includes(requirement.command)) {
       patterns.add(`*/${name}Config.cmake`);
@@ -54,15 +62,12 @@ export function nativeRpmCapabilities(requirements) {
   for (const requirement of requirements) {
     const { requestedName: name, command } = requirement;
     if (command === "find_program") { addProgramPaths(capabilities, requirement); continue; }
+    if (command === "find_library") { addLibraryQueries(capabilities, requirement, true); continue; }
     if (typeof name !== "string" || !namePattern.test(name)) continue;
     if (["dependency", "pkg_check_modules", "pkg_search_module"].includes(command)) capabilities.add(`pkgconfig(${name})`);
     else if (["find_package", "find_dependency"].includes(command)) {
       capabilities.add(`cmake(${name})`);
       capabilities.add(`cmake(${name.toLowerCase()})`);
-    } else if (command === "find_library" && !name.endsWith(".a")) {
-      const library = name.startsWith("lib") ? name : `lib${name}`;
-      const soname = /\.so(?:\.[0-9]+)*$/.test(library) ? library : `${library}.so`;
-      capabilities.add(`${soname}()(64bit)`);
     }
   }
   return [...capabilities].sort();

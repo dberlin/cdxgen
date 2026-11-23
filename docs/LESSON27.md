@@ -611,7 +611,10 @@ a descriptor cannot grant signing trust. Replay rechecks the original
 signed indexes or package archives and uses only matching queries from the
 current scan. It reads external caches without fetching or updating them.
 Executable ownership requires the literal name recorded in the signed
-inventory. Two signed artifacts at the same package version remain separate
+inventory. For `find_library(... NAMES ...)`, the RPM and Debian queries
+include all literal alternatives, not just the first name. Finding a
+versioned package does not prove that it satisfies a custom search root.
+Two signed artifacts at the same package version remain separate
 when their package SHA-256 differs; byte-identical sightings can be merged.
 Project config and environment variables cannot select a replay descriptor.
 

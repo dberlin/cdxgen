@@ -11,7 +11,7 @@ import { acquireNativeRpmMetadata, assertRpmCacheDirectory, nativeRpmCapabilitie
 await describe("official RPM metadata acquisition", async () => {
   it("derives file-provider queries from discovery commands without package-name or version guesses", () => {
     const patterns = nativeRpmFilePatterns([
-      { requestedName: "example", command: "find_library" },
+      { requestedName: "example", command: "find_library", alternatives: ["example", "example-compat", "libexact.so.3", "../escape"] },
       { requestedName: "libexact.a", command: "find_library" },
       { requestedName: "ExampleSDK", command: "find_package" },
       { requestedName: "example-pc", command: "dependency", constraints: ">=9.1" },
@@ -20,18 +20,18 @@ await describe("official RPM metadata acquisition", async () => {
     ]);
     assert.deepEqual(patterns, [
       "*/ExampleSDKConfig.cmake", "*/example-pc.pc", "*/examplesdk-config.cmake",
-      "*/libexact.a", "*/libexample.a", "*/libexample.so",
+      "*/libexact.a", "*/libexact.so.3", "*/libexample-compat.a", "*/libexample-compat.so", "*/libexample.a", "*/libexample.so",
     ]);
   });
 
   it("uses exact indexed virtual capabilities without inventing SONAME major versions or static provides", () => {
     assert.deepEqual(nativeRpmCapabilities([
-      { requestedName: "example", command: "find_library" },
+      { requestedName: "example", command: "find_library", alternatives: ["example-compat", "libalternate.a", "${DYNAMIC}"] },
       { requestedName: "libexact.so.3", command: "find_library" },
       { requestedName: "libstatic.a", command: "find_library" },
       { requestedName: "ExampleSDK", command: "find_package" },
       { requestedName: "example-pc", command: "dependency" },
-    ]), ["cmake(ExampleSDK)", "cmake(examplesdk)", "libexact.so.3()(64bit)", "libexample.so()(64bit)", "pkgconfig(example-pc)"]);
+    ]), ["cmake(ExampleSDK)", "cmake(examplesdk)", "libexact.so.3()(64bit)", "libexample-compat.so()(64bit)", "libexample.so()(64bit)", "pkgconfig(example-pc)"]);
   });
 
   it("queries indexed file ownership for literal find_program names and stops at search controls", () => {
