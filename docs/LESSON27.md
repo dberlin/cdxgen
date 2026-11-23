@@ -649,6 +649,13 @@ directory or an explicit `PATH_SUFFIXES` directory. A private prefix that
 only ends in the requested directory does not qualify. This check does not
 infer unresolved search roots or select a build provider.
 
+An exact source-tree lookup can also link a Git-tracked executable script
+to its versioned source owner. cdxgen checks the searched path, helper
+invocation, guards, executable mode, and source and version evidence against
+the same revision. The script is not executed, indexed as an installed alias,
+or offered to unrelated searches. Owners with scoped lookups are evaluated
+fresh rather than replayed from the owner cache.
+
 Acquisition records are emitted as `cdx:native:acquisition`. A downloaded owner
 version remains separate from interface compatibility and build selection.
 The C++ builder API is asynchronous: library consumers must
