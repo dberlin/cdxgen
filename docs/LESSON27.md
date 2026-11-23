@@ -272,7 +272,7 @@ observation; a hit consumes the original command cost and is used only when the
 remaining budget permits the complete evaluation. Truncated evaluations and
 helpers with transitive file reads are not memoized. Storage limits cause normal
 evaluation, not missing declarations. Summaries live for one evaluation only.
-There is no persistent version-result cache or change to branch/include budgets.
+This does not persist version results or change branch/include budgets.
 
 For automatic multi-ecosystem scans of a single read-only source snapshot,
 `--immutable-source` reuses directory discovery across ecosystem patterns.
@@ -287,6 +287,19 @@ the existing extracted-container cache root.
 The CLI also enables a separate cache for postprocessing discovery, including
 formulation and README searches, under the same explicit single-root assertion.
 That cache is cleared when postprocessing returns or throws.
+
+For repeated passive CMake scans, `--native-owner-evaluation-cache /absolute/private/cache`
+can reuse the output of an unchanged large source owner. Create the directory
+outside the project and acquisition/evidence directories with mode `0700`;
+use `--immutable-source --no-install-deps` and keep the source and tool
+installation unchanged throughout each scan. This Linux cache is off by default
+and can only be enabled by the operator's launch arguments. `--no-cache`
+disables it. Changes between scans are allowed: current discovery, exact
+evaluation bindings and the observed source files, missing paths and directory
+listings determine reuse. Unsupported observations fall back to evaluation.
+Authentication, requirement matching and BOM assembly always run on current
+inputs. This directory is separate from `--native-source-cache`.
+
 Within each cached directory walk, string-array exclusions also reuse the
 native glob ignore decisions for the same path and matching options. Separate
 working directories and exclusion lists retain separate decisions; custom

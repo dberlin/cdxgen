@@ -475,6 +475,11 @@ const args = _yargs
     type: "string",
     description: "External native evidence cache; consumed passively offline. Only launch arguments/environment can configure acquisition writes.",
   })
+  .option("native-owner-evaluation-cache", {
+    type: "string",
+    requiresArg: true,
+    description: "Private absolute directory for unchanged CMake owner evaluation. Explicit launch arguments only; requires --immutable-source and no project tooling.",
+  })
   .option("native-acquire-hosts", {
     type: "string",
     description: "Comma-separated exact HTTPS acquisition host allowlist, including redirect destinations. Defaults to supported public producer origins.",
