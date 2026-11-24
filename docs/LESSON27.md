@@ -631,6 +631,15 @@ Two signed artifacts at the same package version remain separate
 when their package SHA-256 differs; byte-identical sightings can be merged.
 Project config and environment variables cannot select a replay descriptor.
 
+For signed Debian library evidence, default searches consider native library
+directories, including the archive architecture's multiarch directories.
+A private directory can contribute through an explicit `HINTS` or `PATHS`
+entry; an unresolved root does not rule it out. A versioned shared-library
+filename (SONAME) remains an ownership candidate if CMake's effective
+suffixes are unknown. Treat signed `*Config.cmake` file membership the same
+way: the owning package and version are known, but interface compatibility
+is `unknown` and the provider is not selected.
+
 For AMD's XRT PPA, if the signed archive has no Contents index, the scanner
 can join the signed Packages index to the verified package's file inventory
 for requested XRT and AIEBU tools. `--native-mlir-aie-wheel` takes an exact
