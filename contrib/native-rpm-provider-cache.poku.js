@@ -24,6 +24,21 @@ await describe("official RPM metadata acquisition", async () => {
     ]);
   });
 
+  it("queries literal header basenames and complete platform library filenames without fabricating suffixes", () => {
+    const requirements = [
+      { requestedName: "api/header.h", command: "find_path", alternatives: ["api/header.h", "header_alt.hpp", "../escape.h", "${ROOT}/hidden.h"] },
+      { requestedName: "api/header.h", command: "find_file" },
+      { requestedName: "libexact.dylib", command: "find_library" },
+      { requestedName: "example.lib", command: "find_library" },
+      { requestedName: "example.dll", command: "find_library" },
+      { requestedName: "config.cmake", command: "find_file" },
+    ];
+    assert.deepEqual(nativeRpmFilePatterns(requirements), [
+      "*/example.dll", "*/example.lib", "*/header.h", "*/header_alt.hpp", "*/libexact.dylib",
+    ]);
+    assert.deepEqual(nativeRpmCapabilities(requirements), []);
+  });
+
   it("uses exact indexed virtual capabilities without inventing SONAME major versions or static provides", () => {
     assert.deepEqual(nativeRpmCapabilities([
       { requestedName: "example", command: "find_library", alternatives: ["example-compat", "libalternate.a", "${DYNAMIC}"] },

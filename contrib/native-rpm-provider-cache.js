@@ -24,13 +24,24 @@ function addProgramPaths(paths, requirement) {
   }
 }
 
+function addHeaderQueries(queries, requirement) {
+  for (const name of [requirement.requestedName, ...(requirement.alternatives || [])]) {
+    if (typeof name !== "string" ||
+      !/^[A-Za-z0-9_][A-Za-z0-9_.+-]*(?:\/[A-Za-z0-9_][A-Za-z0-9_.+-]*)*\.(?:h|hpp|hxx)$/.test(name)) continue;
+    // The signed Debian Contents join uses leaf names. Its actual file paths
+    // remain the evidence for any later directory/header-suffix predicate.
+    queries.add(`*/${name.slice(name.lastIndexOf("/") + 1)}`);
+  }
+}
+
 function addLibraryQueries(queries, requirement, capabilities = false) {
   for (const name of [requirement.requestedName, ...(requirement.alternatives || [])]) {
     if (typeof name !== "string" || !namePattern.test(name)) continue;
     const library = name.startsWith("lib") ? name : `lib${name}`;
+    const exactFile = /\.(?:so(?:\.[0-9]+)*|a|dylib|lib|dll)$/.test(name);
     if (capabilities) {
-      if (!name.endsWith(".a")) queries.add(`${/\.so(?:\.[0-9]+)*$/.test(library) ? library : `${library}.so`}()(64bit)`);
-    } else if (/\.(?:so(?:\.[0-9]+)*|a)$/.test(name)) queries.add(`*/${name}`);
+      if (!exactFile || /\.so(?:\.[0-9]+)*$/.test(name)) queries.add(`${exactFile ? name : `${library}.so`}()(64bit)`);
+    } else if (exactFile) queries.add(`*/${name}`);
     else {
       queries.add(`*/${library}.so`);
       queries.add(`*/${library}.a`);
@@ -44,6 +55,7 @@ export function nativeRpmFilePatterns(requirements) {
   for (const requirement of requirements) {
     if (requirement.command === "find_program") { addProgramPaths(patterns, requirement); continue; }
     if (requirement.command === "find_library") { addLibraryQueries(patterns, requirement); continue; }
+    if (["find_path", "find_file"].includes(requirement.command)) { addHeaderQueries(patterns, requirement); continue; }
     const name = requirement.requestedName;
     if (typeof name !== "string" || !namePattern.test(name)) continue;
     if (["dependency", "pkg_check_modules", "pkg_search_module"].includes(requirement.command)) {

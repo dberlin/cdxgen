@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
 
 import { hashRegularFile, openRegularFile, readRegularTextFile } from "../lib/core/boundedFile.js";
-import { nativeProgramNames } from "../lib/ecosystems/nativeExternalMetadata.js";
+import { nativePackageFileExports, nativeProgramNames } from "../lib/ecosystems/nativeExternalMetadata.js";
 import { fetchNativeAcquisitionBytes, nativeAcquisitionRemaining, nativeAcquisitionUrl } from "./native-acquisition-policy.js";
 import { nativeProviderCacheWriter } from "./native-provider-cache.js";
 import { nativeRpmFilePatterns } from "./native-rpm-provider-cache.js";
@@ -114,7 +114,8 @@ async function matchedPackages(contents, plan, deadline) {
     if (boundary === line.length - 1) return;
     const path = line.slice(0, boundary).trimEnd();
     const leaf = path.slice(path.lastIndexOf("/") + 1);
-    const matchesFile = files.has(leaf);
+    const matchesFile = files.has(leaf) && (!/\.(?:h|hpp|hxx)$/.test(leaf) ||
+      nativePackageFileExports([path]).some((entry) => entry.kind === "header-file"));
     const program = programLeaves.has(leaf) ? debProgram(path) : undefined;
     const matchesProgram = programs.has(program);
     if (!(matchesFile || matchesProgram) || !fileToken.test(path) || path.split("/").some((part) => !part || part === ".." || part === ".")) return;

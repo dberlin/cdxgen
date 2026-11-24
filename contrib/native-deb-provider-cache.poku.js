@@ -24,7 +24,7 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
     writeFileSync(keyring, gpg(["--export"]));
     const owner = "Package: actual-owner\nVersion: 2:3.1-4\nArchitecture: amd64\nFilename: pool/main/a/actual-owner_3.1-4_amd64.deb\nSHA256: " + "a".repeat(64) + "\n";
     const shell = owner.replaceAll("actual-owner", "find-me").replace("2:3.1-4", "99.9");
-    const contents = gzipSync("usr/bin/find-me\tutils/actual-owner\nusr/share/doc/find-me/find-me utils/find-me\nusr/libexec/helpers/real.cmd utils/actual-owner\nusr/bin/exe-only.exe utils/actual-owner\nusr/bin/history utils/ambiguous-owner\n");
+    const contents = gzipSync("usr/bin/find-me\tutils/actual-owner\nusr/share/doc/find-me/find-me utils/find-me\nusr/libexec/helpers/real.cmd utils/actual-owner\nusr/bin/exe-only.exe utils/actual-owner\nusr/bin/history utils/ambiguous-owner\nusr/include/api/header.h devel/actual-owner\nusr/share/doc/find-me/header.h devel/find-me\n");
     const ambiguous = owner.replaceAll("actual-owner", "ambiguous-owner");
     const packages = gzipSync(`${shell}\n${owner}\n${ambiguous}\n${ambiguous.replace("2:3.1-4", "3:4.0-1")}\n`);
     const allControl = owner.replaceAll("actual-owner", "neutral-owner").replaceAll("amd64", "all");
@@ -42,7 +42,8 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
       return new Response(tamper && path.endsWith("Packages.gz") ? Buffer.from(packages).fill(0) : local.get(path));
     };
     const requirements = [{ role: "tool", command: "find_program", requestedName: "find-me", file: "CMakeLists.txt", line: 2,
-      arguments: ["TOOL", "NAMES", "find-me", "helpers/real.cmd", "neutral-command", "history", "exe-only", "exe-only.exe", "../unsafe", "PATHS", "/local/wrong"] }];
+      arguments: ["TOOL", "NAMES", "find-me", "helpers/real.cmd", "neutral-command", "history", "exe-only", "exe-only.exe", "../unsafe", "PATHS", "/local/wrong"] },
+      { role: "file-search", command: "find_path", requestedName: "api/header.h", file: "FindAPI.cmake", line: 3 }];
     const options = { nativeSourceCache: cache, nativeDebRepositories: `https://example.org/debian|sandbox|main|amd64|${keyring}`,
       nativeAcquire: true, nativeAcquireHosts: "example.org" };
     const rejected = await acquireNativeEvidence(requirements, source, options);
@@ -62,7 +63,7 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
     assert.deepEqual(providers.find((entry) => entry.name === "neutral-owner")?.exports.map((entry) => entry.name), ["neutral-command"]);
     assert.deepEqual(provider.exports.map((entry) => [entry.name, entry.file]), [
       ["exe-only.exe", "/usr/bin/exe-only.exe"],
-      ["find-me", "/usr/bin/find-me"], ["helpers/real.cmd", "/usr/libexec/helpers/real.cmd"],
+      ["find-me", "/usr/bin/find-me"], ["api/header.h", "/usr/include/api/header.h"], ["helpers/real.cmd", "/usr/libexec/helpers/real.cmd"],
     ]);
     globalThis.fetch = () => { throw new Error("offline must not fetch"); };
     const warm = await acquireNativeEvidence(requirements, source, { ...options, nativeAcquire: false });
@@ -80,6 +81,10 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
     assert.deepEqual(loadNativeExternalMetadata(focused.options).map(({ name, version, exports }) =>
       [name, version, exports.map((entry) => [entry.name, entry.file])]),
       [["actual-owner", "2:3.1-4", [["exe-only.exe", "/usr/bin/exe-only.exe"], ["find-me", "/usr/bin/find-me"]]]]);
+    const focusedHeader = await acquireNativeEvidence([requirements[1]], source, replayOptions);
+    assert.deepEqual(loadNativeExternalMetadata(focusedHeader.options).map(({ name, version, exports }) =>
+      [name, version, exports.map(({ kind, name, file }) => [kind, name, file])]),
+    [["actual-owner", "2:3.1-4", [["header-file", "api/header.h", "/usr/include/api/header.h"]]]]);
     const focusedDiagnostic = focused.diagnostics.find((e) => e.family === "deb-replay");
     assert.ok(focusedDiagnostic?.blockers.some((entry) => entry.requestedName === "exe-only"));
     const noOverlap = await acquireNativeEvidence([{ ...requirements[0], arguments: ["TOOL", "NAMES", "unrelated"] }], source, replayOptions);
