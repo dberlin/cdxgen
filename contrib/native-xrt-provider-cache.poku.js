@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -23,6 +23,11 @@ if (process.platform === "linux" && tools.every(existsSync)) await test("AMD's s
     mkdirSync(source); mkdirSync(keydir, { mode: 0o700 }); mkdirSync(metadata);
     mkdirSync(join(data, "usr", "bin"), { recursive: true });
     mkdirSync(join(data, "usr", "share", "doc"), { recursive: true });
+    mkdirSync(join(data, "usr", "lib", "cmake", "real"), { recursive: true });
+    writeFileSync(join(data, "usr", "lib", "cmake", "real", "real-config.cmake"), "set(real_FOUND TRUE)");
+    writeFileSync(join(data, "usr", "lib", "libreal.so.1"), "library bytes");
+    symlinkSync("libreal.so.1", join(data, "usr", "lib", "libreal.so"));
+    symlinkSync("absent.so", join(data, "usr", "lib", "libabsent.so"));
     writeFileSync(join(data, "usr", "bin", "xrt-smi"), "do not run this", { mode: 0o755 });
     writeFileSync(join(data, "usr", "bin", "xclbinutil"), "do not run this", { mode: 0o755 });
     writeFileSync(join(data, "usr", "bin", "aie-hsaco"), "not executable");
@@ -68,6 +73,28 @@ if (process.platform === "linux" && tools.every(existsSync)) await test("AMD's s
     assert.deepEqual(fetched, [...responses.keys()]);
     const debEvidence = xrt.repositoryEvidence.artifact;
     assert.equal(debEvidence.url, `${base}/${filename}`);
+    const sparseRequirements = ["real", "absent"].map((requestedName, n) => ({
+      role: "software", command: "find_library", requestedName, file: "CMakeLists.txt", line: n + 11,
+      arguments: ["LIB", requestedName], conditions: [],
+    }));
+    sparseRequirements.push({ role: "software", command: "find_package", requestedName: "real",
+      file: "CMakeLists.txt", line: 20, arguments: ["real", "CONFIG"], conditions: [] });
+    const sparseOptions = { ...options, nativeDebArtifactPackages: "libxrt-utils" };
+    const sparse = await acquireNativeEvidence(sparseRequirements, source, sparseOptions);
+    const sparseProviders = loadNativeExternalMetadata(sparse.options);
+    assert.equal(sparseProviders.length, 1);
+    assert.equal(sparseProviders[0].version, "1:8.7-3");
+    assert.ok(sparseProviders[0].exports.some(({ kind, name, file }) => kind === "cmake-package" && name === "real" && file.endsWith("/real-config.cmake")));
+    assert.ok(sparseProviders[0].exports.some(({ kind, name, file }) => kind === "library" && name === "real" && file.endsWith("/libreal.so")));
+    assert.ok(!sparseProviders[0].exports.some(({ name }) => name === "absent"));
+    const sparseSelector = readdirSync(join(cache, "acquisitions")).filter((name) => name.endsWith(".deb-replay.json"))
+      .map((name) => join(cache, "acquisitions", name)).find((path) => JSON.parse(readFileSync(path, "utf8")).plan.packages);
+    assert.ok(sparseSelector);
+    globalThis.fetch = () => { throw new Error("offline replay fetched"); };
+    const sparseReplay = await acquireNativeEvidence(sparseRequirements, source, {
+      ...options, nativeAcquire: false, nativeSourceCache: undefined, nativeDebReplay: sparseSelector,
+    });
+    assert.deepEqual(loadNativeExternalMetadata(sparseReplay.options), sparseProviders);
     globalThis.fetch = () => { throw new Error("offline replay fetched"); };
     const warm = await acquireNativeEvidence(requirements, source, { ...options, nativeAcquire: false });
     assert.deepEqual(loadNativeExternalMetadata(warm.options), providers);

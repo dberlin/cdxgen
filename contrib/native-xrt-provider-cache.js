@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
+import { posix } from "node:path";
 
 import { nativeAcquisitionRemaining } from "./native-acquisition-policy.js";
 
@@ -40,7 +41,7 @@ function debMembers(bytes) {
 
 /** `bytes` have already matched size and SHA256 from the signed Packages
  * index. Only trusted tar reads member metadata or one control file to stdout. */
-export function nativeDebArtifactPrograms(bytes, expected, programs, deadline) {
+export function nativeDebArtifactMatches(bytes, expected, plan, deadline) {
   const members = debMembers(bytes);
   const tar = (part, args, maximum) => {
     const entries = [...members.keys()].filter((key) => key === `${part}.tar` || key.startsWith(`${part}.tar.`));
@@ -60,15 +61,36 @@ export function nativeDebArtifactPrograms(bytes, expected, programs, deadline) {
     if (fields.length !== 1 || fields[0][1] !== expected[key]) throw new Error(`Debian artifact ${key} disagrees with signed Packages index`);
   }
   const found = new Map();
-  const wanted = new Set(programs);
   const listing = tar("data", ["--quoting-style=escape", "--numeric-owner", "-tvf", "-"], 2 * 1024 * 1024);
   for (const line of listing.split("\n")) {
-    const entry = /^(\S+)\s+\d+\/\d+\s+\d+\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+(?:\.\/)?([A-Za-z0-9_.+@/-]+)(?:$| (?:->|link to) )/.exec(line);
+    const entry = /^(\S+)\s+\d+\/\d+\s+\d+\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+(?:\.\/)?([A-Za-z0-9_.+@/-]+)(?:$| -> ([A-Za-z0-9_.+@/-]+)$| link to [A-Za-z0-9_.+@/-]+$)/.exec(line);
     if (!entry) continue;
-    const [, mode, path] = entry;
+    const [, mode, path, link] = entry;
     if (path.split("/").some((part) => !part || part === "." || part === "..")) continue;
-    const name = /(?:^|\/)(?:bin|sbin|libexec)\/(.+)$/.exec(path)?.[1];
-    if (wanted.has(name)) found.set(`/${path}`, !found.has(`/${path}`) && /^-/.test(mode) && /[xst]/.test(mode) ? name : undefined);
+    found.set(path, found.has(path) ? undefined : { mode, link });
   }
-  return [...found].filter(([, name]) => name !== undefined);
+  const regular = (path) => {
+    const seen = new Set();
+    while (path && !seen.has(path) && seen.size < 32) {
+      seen.add(path);
+      const member = found.get(path);
+      if (member?.mode.startsWith("-")) return true;
+      if (!member?.mode.startsWith("l") || !member.link || posix.isAbsolute(member.link)) return false;
+      path = posix.normalize(posix.join(posix.dirname(path), member.link));
+      if (path === ".." || path.startsWith("../")) return false;
+    }
+    return false;
+  };
+  const programs = new Set(plan.programs);
+  const files = new Set(plan.files);
+  const matches = new Map();
+  for (const [path, member] of found) {
+    const name = /(?:^|\/)(?:bin|sbin|libexec)\/(.+)$/.exec(path)?.[1];
+    const leaf = posix.basename(path);
+    const keys = [];
+    if (programs.has(name) && member?.mode.startsWith("-") && /[xst]/.test(member.mode)) keys.push(name);
+    if (files.has(leaf) && (!/\.(?:h|hpp|hxx)$/.test(leaf) || /(?:^|\/)include\//.test(path)) && regular(path)) keys.push(leaf);
+    if (keys.length) matches.set(`/${path}`, keys);
+  }
+  return matches;
 }

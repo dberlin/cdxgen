@@ -11,7 +11,7 @@ import { nativeFinderReceiptEntry } from "../lib/ecosystems/nativeScopedReceipts
 import { fetchNativeAcquisitionBytes, nativeAcquisitionRemaining, nativeAcquisitionUrl } from "./native-acquisition-policy.js";
 import { nativeProviderCacheWriter } from "./native-provider-cache.js";
 import { nativeRpmFilePatterns } from "./native-rpm-provider-cache.js";
-import { nativeDebArtifactPrograms, nativeXrtDebOwner, nativeXrtDebPrograms } from "./native-xrt-provider-cache.js";
+import { nativeDebArtifactMatches, nativeXrtDebOwner, nativeXrtDebPrograms } from "./native-xrt-provider-cache.js";
 
 const MAX_INDEX = 48 * 1024 * 1024;
 const MAX_UNPACKED = 512 * 1024 * 1024;
@@ -231,12 +231,14 @@ export async function acquireNativeDebProviders({ plan, repositories, output, ma
   const matched = new Set();
   let retryable = false;
   if (repositories.length > 4) throw new Error("A maximum of four Debian archive suites is permitted per scan");
+  if (plan.packages && (!Array.isArray(plan.packages) || plan.packages.length > 32 ||
+    plan.packages.some((name) => typeof name !== "string" || name.length > 255 || !ownerToken.test(name)))) throw new Error("Invalid bounded Debian artifact package candidates");
   for (const [spec, expectedKeyring] of repositories) {
     try {
       const repository = trustedRepository(spec, sourceRoot, allowedHosts);
       const { archiveRoot, base, suite, component, arch, keyringSha256 } = repository;
       const vendorPrograms = nativeXrtDebPrograms(archiveRoot, component, plan);
-      if (vendorPrograms?.length === 0) continue;
+      if (vendorPrograms?.length === 0 && !plan.packages?.length) continue;
       if (keyringSha256 !== expectedKeyring) throw new Error("Debian signing keyring changed");
       const scopePath = `repositories/${hash(JSON.stringify([base, keyringSha256]))}`;
       const releasePath = `${scopePath}/InRelease`;
@@ -279,33 +281,34 @@ export async function acquireNativeDebProviders({ plan, repositories, output, ma
           files: [{ path: `${prefix}.list`, sha256: hash(listing) }], repositoryEvidence: { path: provenancePath, sha256: hash(provenance) },
           platform: "linux", targetArch: archMap[arch], conditions: [`Signed Debian archive suite ${suite}/${component}; available, not installed or selected`] });
       };
-      if (vendorPrograms?.length && !checksum.has(`${component}/Contents-${arch}.gz`)) {
+      if ((plan.packages?.length || vendorPrograms?.length) && !checksum.has(`${component}/Contents-${arch}.gz`)) {
         const { bytes: packagesBytes, ...packages } = await getIndex(`${component}/binary-${arch}/Packages.gz`);
         const requests = new Map();
-        for (const program of vendorPrograms) {
+        for (const program of vendorPrograms || []) {
           const owner = nativeXrtDebOwner(program);
           if (!requests.has(owner)) requests.set(owner, []);
           requests.get(owner).push(program);
         }
         const controls = await selectedControls(packagesBytes, undefined, arch, deadline,
-          (fields) => fields.Source === "xrt" && requests.has(fields.Package));
+          (fields) => plan.packages?.includes(fields.Package) || fields.Source === "xrt" && requests.has(fields.Package));
         for (const [name, fields] of controls) {
           const size = Number(fields?.Size);
           if (!Number.isSafeInteger(size) || size <= 0 || size > 16 * 1024 * 1024) {
-            unavailable.push({ name, reason: "Signed AMD XRT package record is invalid, ambiguous, or oversized" }); continue;
+            unavailable.push({ name, reason: "Signed Debian package record is invalid, ambiguous, or oversized" }); continue;
           }
           const path = `${scopePath}/${fields.SHA256}.deb`;
           const url = `${archiveRoot}/${fields.Filename}`;
           let bytes = regularBytes(join(output, path), size, output, deadline);
           const matches = (value) => value?.length === size && hash(value) === fields.SHA256;
           if (!matches(bytes)) {
-            if (!network) throw new Error("Cached AMD XRT package failed authentication");
+            if (!network) throw new Error("Cached Debian artifact failed authentication");
             ({ bytes } = await fetchNativeAcquisitionBytes(url, { allowedHosts, deadline, maximum: size }));
-            if (!matches(bytes)) throw new Error("AMD XRT package hash or size mismatch");
+            if (!matches(bytes)) throw new Error("Debian artifact hash or size mismatch");
             writer.write(path, bytes);
           }
-          const files = nativeDebArtifactPrograms(bytes, fields, requests.get(name), deadline);
-          if (files.length) record(fields, new Map(files.map(([path, name]) => [path, [name]])),
+          const demand = plan.packages?.includes(name) ? plan : { programs: requests.get(name), files: [] };
+          const files = nativeDebArtifactMatches(bytes, fields, demand, deadline);
+          if (files.size) record(fields, files,
             { packages, artifact: { path, url, size, sha256: fields.SHA256 } });
         }
         continue;

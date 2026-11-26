@@ -500,6 +500,10 @@ const args = _yargs
     type: "string",
     description: "Comma-separated HTTPS_ROOT|SUITE|COMPONENT|ARCH|/absolute/TRUSTED_KEYRING.gpg contexts for signed DEB metadata. Host APT sources are never used.",
   })
+  .option("native-deb-artifact-packages", {
+    type: "string",
+    description: "Comma-separated candidate DEB package names for signed repositories without Contents indexes (max 32). Only authenticated archive members matching the exact source demand become providers. Launch arguments only.",
+  })
   .option("native-deb-replay", {
     type: "string",
     array: true,
