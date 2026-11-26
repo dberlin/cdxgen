@@ -204,8 +204,20 @@ function trustedRepository(spec, sourceRoot, allowedHosts) {
   return { ...repository, keyring, verifier, keyringSha256 };
 }
 
+export const nativeDebArchiveSuiteLimit = 4;
+const replayRepositoryLimit = 12;
+
 export function nativeDebTrustedContext(repositories, sourceRoot, allowedHosts) {
-  if (repositories.length > 4) throw new Error("A maximum of four Debian archive suites is permitted per scan");
+  if (repositories.length > nativeDebArchiveSuiteLimit) throw new Error("A maximum of four Debian archive suites is permitted per scan");
+  return repositories.map((spec) => [spec, trustedRepository(spec, sourceRoot, allowedHosts).keyringSha256]);
+}
+
+/** An explicit replay may trust several independent repository contexts,
+ * but each descriptor must still obey the original acquisition limit. */
+export function nativeDebReplayTrustedContext(repositories, sourceRoot, allowedHosts) {
+  if (repositories.length > replayRepositoryLimit || new Set(repositories).size !== repositories.length) {
+    throw new Error(`At most ${replayRepositoryLimit} distinct Debian replay repositories are permitted`);
+  }
   return repositories.map((spec) => [spec, trustedRepository(spec, sourceRoot, allowedHosts).keyringSha256]);
 }
 
@@ -231,7 +243,7 @@ export async function acquireNativeDebProviders({ plan, repositories, output, ma
   const providers = []; const unavailable = [];
   const matched = new Set();
   let retryable = false;
-  if (repositories.length > 4) throw new Error("A maximum of four Debian archive suites is permitted per scan");
+  if (repositories.length > nativeDebArchiveSuiteLimit) throw new Error("A maximum of four Debian archive suites is permitted per scan");
   if (plan.packages && (!Array.isArray(plan.packages) || plan.packages.length > 32 ||
     plan.packages.some((name) => typeof name !== "string" || name.length > 255 || !ownerToken.test(name)))) throw new Error("Invalid bounded Debian artifact package candidates");
   for (const [spec, expectedKeyring] of repositories) {

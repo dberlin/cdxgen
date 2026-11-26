@@ -94,6 +94,47 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
     assert.deepEqual(loadNativeExternalMetadata(focusedHeader.options).map(({ name, version, exports }) =>
       [name, version, exports.map(({ kind, name, file }) => [kind, name, file])]),
     [["actual-owner", "2:3.1-4", [["header-file", "api/header.h", "/usr/include/api/header.h"]]]]);
+
+    // Each separately produced descriptor keeps its signed suite and original
+    // query plan. More than four can be replayed, without expanding the
+    // repository limit of any one acquisition.
+    for (const request of [
+      ...["find-me", "helpers/real.cmd", "neutral-command", "exe-only.exe"].map((name) =>
+        ({ ...requirements[0], arguments: ["TOOL", "NAMES", name] })),
+      requirements[1],
+    ]) await acquireNativeEvidence([request], source, options);
+    const selectors = readdirSync(join(cache, "acquisitions")).filter((name) => name.endsWith(".deb-replay.json"))
+      .map((name) => join(cache, "acquisitions", name));
+    assert.equal(selectors.length, 6);
+    const repositories = [options.nativeDebRepositories,
+      ...Array.from({ length: 4 }, (_, index) => options.nativeDebRepositories.replace("|sandbox|", `|other${index}|`))];
+    const manyOptions = { ...replayOptions, nativeDebReplay: selectors, nativeDebRepositories: repositories };
+    const many = await acquireNativeEvidence(requirements, source, manyOptions);
+    assert.equal(many.diagnostics.filter((entry) => entry.family === "deb-replay" &&
+      ["cached", "partial"].includes(entry.status)).length, 6);
+    const members = new Set(loadNativeExternalMetadata(many.options).flatMap((entry) => entry.exports.map((member) => member.file)));
+    for (const member of ["/usr/bin/find-me", "/usr/bin/neutral-command", "/usr/bin/exe-only.exe",
+      "/usr/include/api/header.h", "/usr/libexec/helpers/real.cmd"]) assert(members.has(member), member);
+    const direct = await acquireNativeEvidence(requirements, source, { ...options, nativeDebRepositories: repositories });
+    assert.deepEqual(loadNativeExternalMetadata(direct.options), []);
+    assert(direct.diagnostics.some((entry) => entry.family === "deb" && /four Debian archive suites/.test(entry.prerequisite)));
+    for (const invalid of [
+      { ...manyOptions, nativeDebRepositories: [repositories[0], ...Array.from({ length: 12 }, (_, index) =>
+        options.nativeDebRepositories.replace("|sandbox|", `|extra${index}|`))] },
+      { ...manyOptions, nativeDebRepositories: [...repositories, repositories[0]] },
+      { ...manyOptions, nativeDebRepositories: [...repositories, repositories[0].replace("example.org", "different.invalid")] },
+      { ...manyOptions, nativeDebReplay: [...selectors, ...Array(7).fill(selectors[0])] },
+    ]) {
+      const rejectedMany = await acquireNativeEvidence(requirements, source, invalid);
+      assert.deepEqual(loadNativeExternalMetadata(rejectedMany.options), []);
+      assert(rejectedMany.diagnostics.some((entry) => entry.family === "deb-replay" && entry.status === "blocked"));
+    }
+    const oversizedDescriptor = join(root, "oversized.deb-replay.json");
+    writeFileSync(oversizedDescriptor, JSON.stringify({ ...JSON.parse(readFileSync(selectors[0], "utf8")), repositories }));
+    const oversized = await acquireNativeEvidence(requirements, source, { ...manyOptions, nativeDebReplay: [oversizedDescriptor] });
+    assert.deepEqual(loadNativeExternalMetadata(oversized.options), []);
+    assert(oversized.diagnostics.some((entry) => entry.family === "deb-replay" &&
+      /Invalid bounded Debian replay selector/.test(entry.prerequisite)));
     const sourceText = "if(OPTIONAL)\nfind_package(Backend MODULE REQUIRED)\nendif()\n";
     writeFileSync(join(source, "CMakeLists.txt"), sourceText);
     const occurrence = { role: "software", command: "find_package", requestedName: "Backend",
@@ -105,9 +146,9 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
       owner: { name: provider.name, version: provider.version, metadataSha256: provider.metadataSha256 },
       lookup: { kind: "finder-owner" }, output: { name: "Backend", member: "/usr/include/api/header.h" },
       evidence: [{ file: "package.deb", sha256: sha(packageBytes) }] };
-    const receiptSelector = (claim) => {
+    const receiptSelector = (claim, directory = bundle) => {
       const text = JSON.stringify({ format: "native-scoped-receipts-v1", sourceRoot: source, records: [claim] });
-      const path = join(bundle, "receipt.json");
+      const path = join(directory, "receipt.json");
       writeFileSync(path, text);
       return `${sha(text)}:${path}`;
     };
@@ -116,6 +157,14 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
     assert.deepEqual(loadNativeExternalMetadata(scopedFinder.options).map(({ name, version, exports }) =>
       [name, version, exports.map(({ kind, name, file }) => [kind, name, file])]),
     [["actual-owner", "2:3.1-4", [["header-file", "api/header.h", "/usr/include/api/header.h"]]]]);
+    const inertBundle = join(root, "unrelated-receipt");
+    mkdirSync(inertBundle);
+    writeFileSync(join(inertBundle, "package.deb"), packageBytes);
+    const inert = receiptSelector({ ...record, occurrence: { ...occurrence, conditions: ["if(OTHER)"] } }, inertBundle);
+    const scopedMany = await acquireNativeEvidence([occurrence], source, {
+      ...scopedOptions, nativeScopedReceipt: [inert, scopedOptions.nativeScopedReceipt],
+    });
+    assert.deepEqual(loadNativeExternalMetadata(scopedMany.options), loadNativeExternalMetadata(scopedFinder.options));
     const wrongGuard = await acquireNativeEvidence([{ ...occurrence, conditions: ["if(OTHER)"] }], source, scopedOptions);
     assert.deepEqual(loadNativeExternalMetadata(wrongGuard.options), []);
     const wrongMember = await acquireNativeEvidence([occurrence], source, {

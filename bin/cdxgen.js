@@ -288,7 +288,9 @@ const args = _yargs
   })
   .option("native-scoped-receipt", {
     type: "string",
-    description: "Import exact operator-approved configured package observations (SHA256:/absolute/manifest.json). Read-only; never configures or installs.",
+    array: true,
+    nargs: 1,
+    description: "Import exact operator-approved configured package observations (SHA256:/absolute/manifest.json). Repeat for up to 16 distinct bundles; read-only, never configures or installs.",
   })
   .option("compile-commands", {
     type: "string",
@@ -508,7 +510,7 @@ const args = _yargs
     type: "string",
     array: true,
     nargs: 1,
-    description: "Reverify a selected signed DEB cache descriptor offline. Repeat for multiple descriptors. Launch arguments only.",
+    description: "Reverify a selected signed DEB cache descriptor offline. Repeat for up to 12 descriptors with up to 12 independently trusted repository contexts (max 4 per descriptor). Launch arguments only.",
   })
   .option("native-pypi-releases", {
     type: "string",

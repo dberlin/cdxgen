@@ -618,11 +618,15 @@ operator keyring is required and the scanner does not consult host APT sources.
 Successful bounded signed DEB acquisition writes an
 `acquisitions/<key>.deb-replay.json` descriptor alongside its receipt.
 If a later scan has a different query set, repeat `--native-deb-replay
-/absolute/path/to/<key>.deb-replay.json` for up to four earlier descriptors.
+/absolute/path/to/<key>.deb-replay.json` for up to twelve earlier descriptors.
 Keep the corresponding `--native-deb-repositories` values in the launch:
 a descriptor cannot grant signing trust. Replay rechecks the original
 signed indexes or package archives and uses only matching queries from the
 current scan. It reads external caches without fetching or updating them.
+An explicit replay launch may declare up to twelve distinct trusted
+repository contexts; each descriptor and ordinary acquisition remain
+limited to four contexts. An oversized replay context is not a new direct
+acquisition query.
 Executable ownership requires the literal name recorded in the signed
 inventory. For `find_library(... NAMES ...)`, the RPM and Debian queries
 include all literal alternatives, not just the first name. Finding a
@@ -630,6 +634,16 @@ versioned package does not prove that it satisfies a custom search root.
 Two signed artifacts at the same package version remain separate
 when their package SHA-256 differs; byte-identical sightings can be merged.
 Project config and environment variables cannot select a replay descriptor.
+
+Operators can also import exact configured-package and finder-owner
+observations using `--native-scoped-receipt SHA256:/absolute/manifest.json`.
+Repeat the flag for up to sixteen distinct manifest paths, each with its
+own digest and bounded material inventory. Receipts must be outside the
+scanned checkout and match the exact current source occurrence and pinned
+artifacts. They are available, not selected, provider alternatives.
+Malformed or repeated selectors reject the selector list; a stale bundle
+cannot authorize an observation from that bundle. Only explicit launch
+arguments may select these receipts.
 
 For signed Debian library evidence, default searches consider native library
 directories, including the archive architecture's multiarch directories.
