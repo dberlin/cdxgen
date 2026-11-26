@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 
 import { hashRegularFile, readRegularTextFile } from "../lib/core/boundedFile.js";
-import { nativeProgramNames, nativeProviderPlatformAccepts, nativePythonDistributionName, nativePythonWheelProvider, nativePythonWheelTarget } from "../lib/ecosystems/nativeExternalMetadata.js";
+import { nativeFinderToolNames, nativeProgramNames, nativeProviderPlatformAccepts, nativePythonDistributionName, nativePythonWheelProvider, nativePythonWheelTarget } from "../lib/ecosystems/nativeExternalMetadata.js";
 import { fetchNativeAcquisitionBytes, nativeAcquisitionUrl } from "./native-acquisition-policy.js";
 import { nativeProviderCacheWriter } from "./native-provider-cache.js";
 
@@ -18,14 +18,14 @@ export function nativePyPiAllowed(allowedHosts) {
   catch { return false; }
 }
 
-export function nativePyPiQueryPlan(requirements) {
+export function nativePyPiQueryPlan(requirements, releaseSelectors = []) {
   const names = new Map(); const prefixes = new Map(); const programs = new Map();
   const add = (index, candidate, program) => {
     if (!candidate) return;
     if (!index.has(candidate)) index.set(candidate, new Set());
     index.get(candidate).add(program);
   };
-  for (const requirement of requirements) for (const program of nativeProgramNames(requirement)) {
+  for (const requirement of requirements) for (const program of [...nativeProgramNames(requirement), ...nativeFinderToolNames(requirement)]) {
     const search = program.replace(/\.exe$/i, "");
     const distribution = nativePythonDistributionName(search);
     if (!distribution || distribution.length > 80) continue;
@@ -38,7 +38,18 @@ export function nativePyPiQueryPlan(requirements) {
     add(names, distribution, program);
     if (distribution.includes("-")) add(prefixes, distribution.slice(0, distribution.lastIndexOf("-")), program);
   }
-  const projects = new Map(names);
+  // An explicit release candidate may expose a renamed or historical script
+  // with no reverse PyPI index. It is only a search instruction: the wheel
+  // still has to independently authenticate an exact requested export.
+  if (releaseSelectors.length > 8) throw new Error("At most eight explicit PyPI release candidates are permitted");
+  const projects = new Map();
+  for (const selector of releaseSelectors) {
+    const match = /^([A-Za-z0-9_.-]{1,80})@((?:\d+!)?\d[0-9A-Za-z.+_~-]{0,79})$/.exec(selector);
+    const project = match && nativePythonDistributionName(match[1]);
+    if (!project) throw new Error("PyPI release candidates must be exact PROJECT@VERSION selectors");
+    if (programs.size) projects.set(`${project}@${match[2]}`, new Set(programs.keys()));
+  }
+  for (const [name, exports] of names) projects.set(name, exports);
   for (const [candidate, exports] of prefixes) for (const name of exports) add(projects, candidate, name);
   return { programs: [...programs.keys()].sort(), targets: Object.fromEntries([...programs].map(([name, guards]) => [name, [...guards].sort()])),
     projects: [...projects].slice(0, MAX_PROJECTS).map(([name, exports]) => [name, [...exports].sort()]),
@@ -70,12 +81,13 @@ export async function acquireNativePyPiProviders({ plan, retained = [], output, 
     if (sha256) providers.set(sha256, { metadata: { path, format: "pypi-wheel", sha256: provider.metadataSha256 } });
   }
   const projectDemands = new Map(plan.projects);
-  const inspect = async (project) => {
-    const projectUrl = `${API}${encodeURIComponent(project)}/json`;
+  const inspect = async (query) => {
+    const [project, selectedVersion] = query.split("@");
+    const projectUrl = `${API}${encodeURIComponent(project)}${selectedVersion ? `/${encodeURIComponent(selectedVersion)}` : ""}/json`;
     const maximum = Math.min(metadataBudget, 16 * 1024 * 1024);
     if (maximum <= 0) throw new Error("PyPI project metadata byte budget exceeded");
-    const metadataPath = `projects/${project}.json`;
-    const pinPath = `projects/${project}.sha256`;
+    const metadataPath = `projects/${query}.json`;
+    const pinPath = `projects/${query}.sha256`;
     const expected = readRegularTextFile(join(output, pinPath), 128, output)?.trim();
     let metadata = expected && readRegularTextFile(join(output, metadataPath), maximum, output);
     let fetched = false;
@@ -91,7 +103,8 @@ export async function acquireNativePyPiProviders({ plan, retained = [], output, 
     } else metadataBudget -= Buffer.byteLength(metadata);
     const document = JSON.parse(metadata);
     const { name, version } = document.info || {};
-    if (nativePythonDistributionName(name) !== project || !/^(?:\d+!)?\d[0-9A-Za-z.+_~-]*$/.test(version || "")) throw new Error("PyPI owner identity does not match queried distribution");
+    if (nativePythonDistributionName(name) !== project || !/^(?:\d+!)?\d[0-9A-Za-z.+_~-]*$/.test(version || "") ||
+      selectedVersion && selectedVersion !== version) throw new Error("PyPI owner identity does not match queried distribution or release");
     const candidates = [];
     const dependencies = new Set();
     const projectSha256 = hash(metadata);
@@ -99,7 +112,7 @@ export async function acquireNativePyPiProviders({ plan, retained = [], output, 
       writer.write(metadataPath, metadata);
       writer.write(pinPath, `${projectSha256}\n`);
     }
-    const requested = projectDemands.get(project) || plan.programs;
+    const requested = projectDemands.get(query) || plan.programs;
     const guards = requested.flatMap((name) => plan.targets[name]);
     const restricted = new Set(guards.filter((guard) => guard !== TARGETS.join(",")).flatMap((guard) => guard.split(",")));
     const fallback = guards.includes(TARGETS.join(","));

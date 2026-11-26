@@ -121,3 +121,28 @@ if (existsSync("/usr/bin/zip") && existsSync("/usr/bin/unzip")) await test("a WI
     assert.ok(loadNativeExternalMetadata(result.options)[0].exports.some((entry) => entry.name === "tool.exe"));
   } finally { globalThis.fetch = original; rmSync(root, { recursive: true, force: true }); }
 });
+
+if (existsSync("/usr/bin/zip") && existsSync("/usr/bin/unzip")) await test("an explicit historical distribution release can prove renamed tools without granting ownership to its latest release", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cdxgen-pypi-historical-"));
+  const source = join(root, "source"); const cache = join(root, "cache"); mkdirSync(source);
+  const original = globalThis.fetch;
+  try {
+    const old = wheel(root, "Example-Tools", "1.2", { script: "generator" });
+    const current = wheel(root, "Example-Tools", "3.0", { script: "other" });
+    const url = "https://pypi.org/pypi/example-tools/1.2/json";
+    const fixture = new Map([[url, () => Response.json(old.metadata)], [old.url, () => new Response(old.bytes)],
+      ["https://pypi.org/pypi/example-tools/json", () => Response.json(current.metadata)]]);
+    globalThis.fetch = async (input) => fixture.get(String(input))?.() || new Response(null, { status: 404 });
+    const requirements = [{ role: "tool", command: "find_program", requestedName: "generator", file: "CMakeLists.txt", line: 3,
+      arguments: ["GENERATOR", "generator"] }];
+    const options = { nativeSourceCache: cache, nativeAcquireHosts: "pypi.org,files.pythonhosted.org", nativePyPiReleases: "example-tools@1.2" };
+    const result = await acquireNativeEvidence(requirements, source, { ...options, nativeAcquire: true });
+    const [owner] = loadNativeExternalMetadata(result.options);
+    assert.equal(owner?.version, "1.2");
+    assert.equal(owner.registry.url, url);
+    assert.deepEqual(owner.exports.map((entry) => entry.name), ["generator"]);
+    globalThis.fetch = () => { throw new Error("offline must not fetch"); };
+    const warm = await acquireNativeEvidence(requirements, source, options);
+    assert.deepEqual(loadNativeExternalMetadata(warm.options), [owner]);
+  } finally { globalThis.fetch = original; rmSync(root, { recursive: true, force: true }); }
+});

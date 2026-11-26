@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
 
 import { hashRegularFile, openRegularFile, readRegularTextFile } from "../lib/core/boundedFile.js";
-import { nativePackageFileExports, nativeProgramNames } from "../lib/ecosystems/nativeExternalMetadata.js";
+import { nativeFinderToolNames, nativePackageFileExports, nativeProgramNames } from "../lib/ecosystems/nativeExternalMetadata.js";
 import { nativeFinderReceiptEntry } from "../lib/ecosystems/nativeScopedReceipts.js";
 import { fetchNativeAcquisitionBytes, nativeAcquisitionRemaining, nativeAcquisitionUrl } from "./native-acquisition-policy.js";
 import { nativeProviderCacheWriter } from "./native-provider-cache.js";
@@ -50,7 +50,8 @@ export function scopeNativeDebProviders(providers, programs, files, finderReceip
 
 /** Exact demands from native declaration syntax, not guesses about DEB package names. */
 export function nativeDebQueryPlan(requirements) {
-  const programs = [...new Set(requirements.flatMap(nativeProgramNames))].sort();
+  const programs = [...new Set(requirements.flatMap((requirement) =>
+    [...nativeProgramNames(requirement), ...nativeFinderToolNames(requirement)]))].sort();
   const files = nativeRpmFilePatterns(requirements.filter((item) => item.command !== "find_program"))
     .filter((path) => path.startsWith("*/")).map((path) => path.slice(2)).sort();
   return { programs, files };

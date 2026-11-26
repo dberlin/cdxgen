@@ -510,6 +510,10 @@ const args = _yargs
     nargs: 1,
     description: "Reverify a selected signed DEB cache descriptor offline. Repeat for multiple descriptors. Launch arguments only.",
   })
+  .option("native-pypi-releases", {
+    type: "string",
+    description: "Comma-separated exact PROJECT@VERSION PyPI candidate releases (max 8). Only authenticated wheel scripts matching a source demand become available providers. Launch arguments only.",
+  })
   .option("native-mlir-aie-wheel", {
     type: "string",
     description: "Exact public MLIR-AIE VERSION:WHEEL-TAG for discovered aie-hsaco requests. Never installs the wheel.",

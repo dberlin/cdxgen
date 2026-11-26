@@ -9,8 +9,16 @@ import { strict as assert, test } from "poku";
 
 import { acquireNativeEvidence } from "../lib/cli/nativeAcquisition.js";
 import { loadNativeExternalMetadata } from "../lib/ecosystems/nativeExternalMetadata.js";
+import { nativeDebQueryPlan } from "./native-deb-provider-cache.js";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
+
+test("tool-bearing package finders query concrete program names without equating config-mode requests", () => {
+  const request = (name, ...flags) => ({ role: "software", command: "find_package", requestedName: name, arguments: [name, ...flags] });
+  assert.deepEqual(nativeDebQueryPlan([request("SWIG", "4"), request("Cython", "MODULE")]).programs,
+    ["cython", "cython.bat", "cython3", "swig"]);
+  assert.deepEqual(nativeDebQueryPlan([request("SWIG", "CONFIG"), request("Cython", "NO_MODULE")]).programs, []);
+});
 
 if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/usr/bin/gpgv")) await test("Debian package owners require both signed indexes and exact executable inventory", async () => {
   const root = mkdtempSync(join(tmpdir(), "cdxgen-signed-deb-"));
