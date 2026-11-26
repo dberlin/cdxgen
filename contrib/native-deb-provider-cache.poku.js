@@ -22,7 +22,8 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
   try {
     gpg(["--pinentry-mode", "loopback", "--passphrase", "", "--quick-generate-key", "Fixture <fixture@example.invalid>", "ed25519", "sign", "0"]);
     writeFileSync(keyring, gpg(["--export"]));
-    const owner = "Package: actual-owner\nVersion: 2:3.1-4\nArchitecture: amd64\nFilename: pool/main/a/actual-owner_3.1-4_amd64.deb\nSHA256: " + "a".repeat(64) + "\n";
+    const packageBytes = "Fixture archive bytes";
+    const owner = "Package: actual-owner\nVersion: 2:3.1-4\nArchitecture: amd64\nFilename: pool/main/a/actual-owner_3.1-4_amd64.deb\nSHA256: " + sha(packageBytes) + "\n";
     const shell = owner.replaceAll("actual-owner", "find-me").replace("2:3.1-4", "99.9");
     const contents = gzipSync("usr/bin/find-me\tutils/actual-owner\nusr/share/doc/find-me/find-me utils/find-me\nusr/libexec/helpers/real.cmd utils/actual-owner\nusr/bin/exe-only.exe utils/actual-owner\nusr/bin/history utils/ambiguous-owner\nusr/include/api/header.h devel/actual-owner\nusr/share/doc/find-me/header.h devel/find-me\n");
     const ambiguous = owner.replaceAll("actual-owner", "ambiguous-owner");
@@ -59,7 +60,7 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
     const providers = loadNativeExternalMetadata(cold.options);
     const provider = providers.find((entry) => entry.name === "actual-owner");
     assert.equal(provider.version, "2:3.1-4");
-    assert.equal(provider.packageSha256, "a".repeat(64));
+    assert.equal(provider.packageSha256, sha(packageBytes));
     assert.deepEqual(providers.find((entry) => entry.name === "neutral-owner")?.exports.map((entry) => entry.name), ["neutral-command"]);
     assert.deepEqual(provider.exports.map((entry) => [entry.name, entry.file]), [
       ["exe-only.exe", "/usr/bin/exe-only.exe"],
@@ -85,6 +86,34 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
     assert.deepEqual(loadNativeExternalMetadata(focusedHeader.options).map(({ name, version, exports }) =>
       [name, version, exports.map(({ kind, name, file }) => [kind, name, file])]),
     [["actual-owner", "2:3.1-4", [["header-file", "api/header.h", "/usr/include/api/header.h"]]]]);
+    const sourceText = "if(OPTIONAL)\nfind_package(Backend MODULE REQUIRED)\nendif()\n";
+    writeFileSync(join(source, "CMakeLists.txt"), sourceText);
+    const occurrence = { role: "software", command: "find_package", requestedName: "Backend",
+      file: "CMakeLists.txt", line: 2, ordinal: 1, arguments: ["Backend", "MODULE", "REQUIRED"], conditions: ["if(OPTIONAL)"] };
+    const bundle = join(root, "receipt");
+    mkdirSync(bundle);
+    writeFileSync(join(bundle, "package.deb"), packageBytes);
+    const record = { occurrence, sourceInputs: [], sourceSha256: sha(sourceText),
+      owner: { name: provider.name, version: provider.version, metadataSha256: provider.metadataSha256 },
+      lookup: { kind: "finder-owner" }, output: { name: "Backend", member: "/usr/include/api/header.h" },
+      evidence: [{ file: "package.deb", sha256: sha(packageBytes) }] };
+    const receiptSelector = (claim) => {
+      const text = JSON.stringify({ format: "native-scoped-receipts-v1", sourceRoot: source, records: [claim] });
+      const path = join(bundle, "receipt.json");
+      writeFileSync(path, text);
+      return `${sha(text)}:${path}`;
+    };
+    const scopedOptions = { ...replayOptions, nativeScopedReceipt: receiptSelector(record) };
+    const scopedFinder = await acquireNativeEvidence([occurrence], source, scopedOptions);
+    assert.deepEqual(loadNativeExternalMetadata(scopedFinder.options).map(({ name, version, exports }) =>
+      [name, version, exports.map(({ kind, name, file }) => [kind, name, file])]),
+    [["actual-owner", "2:3.1-4", [["header-file", "api/header.h", "/usr/include/api/header.h"]]]]);
+    const wrongGuard = await acquireNativeEvidence([{ ...occurrence, conditions: ["if(OTHER)"] }], source, scopedOptions);
+    assert.deepEqual(loadNativeExternalMetadata(wrongGuard.options), []);
+    const wrongMember = await acquireNativeEvidence([occurrence], source, {
+      ...replayOptions, nativeScopedReceipt: receiptSelector({ ...record, output: { ...record.output, member: "/usr/include/other/header.h" } }),
+    });
+    assert.deepEqual(loadNativeExternalMetadata(wrongMember.options), []);
     const focusedDiagnostic = focused.diagnostics.find((e) => e.family === "deb-replay");
     assert.ok(focusedDiagnostic?.blockers.some((entry) => entry.requestedName === "exe-only"));
     const noOverlap = await acquireNativeEvidence([{ ...requirements[0], arguments: ["TOOL", "NAMES", "unrelated"] }], source, replayOptions);

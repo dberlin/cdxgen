@@ -7,6 +7,7 @@ import { createGunzip } from "node:zlib";
 
 import { hashRegularFile, openRegularFile, readRegularTextFile } from "../lib/core/boundedFile.js";
 import { nativePackageFileExports, nativeProgramNames } from "../lib/ecosystems/nativeExternalMetadata.js";
+import { nativeFinderReceiptEntry } from "../lib/ecosystems/nativeScopedReceipts.js";
 import { fetchNativeAcquisitionBytes, nativeAcquisitionRemaining, nativeAcquisitionUrl } from "./native-acquisition-policy.js";
 import { nativeProviderCacheWriter } from "./native-provider-cache.js";
 import { nativeRpmFilePatterns } from "./native-rpm-provider-cache.js";
@@ -24,11 +25,24 @@ const debProgram = (path) => /(?:^|\/)(?:s?bin|libexec)\/(.+)$/.exec(path)?.[1];
 
 /** Do not reinterpret an authenticated path as a different executable name
  * (e.g. the generic file parser also emits extensionless Windows aliases). */
-export function scopeNativeDebProviders(providers, programs, files) {
+export function scopeNativeDebProviders(providers, programs, files, finderReceipts = []) {
   const scoped = [];
+  const findersByOwner = new Map();
+  for (const receipt of finderReceipts) {
+    const key = receipt.owner.metadataSha256;
+    if (!findersByOwner.has(key)) findersByOwner.set(key, []);
+    findersByOwner.get(key).push(receipt);
+  }
   for (const provider of providers) {
+    // A receipt's basename is an index query only. Never admit another
+    // physical path or same-named package owner through that query.
+    let exact;
+    for (const receipt of findersByOwner.get(provider.metadataSha256) || []) {
+      if (nativeFinderReceiptEntry(receipt, provider)) (exact ||= new Set()).add(receipt.output.member);
+    }
     const exports = provider.exports.filter((entry) => entry.file && (entry.kind === "tool" ?
-      programs.has(entry.name) && debProgram(entry.file) === entry.name : files.has(entry.file.slice(entry.file.lastIndexOf("/") + 1))));
+      programs.has(entry.name) && debProgram(entry.file) === entry.name :
+      exact?.has(entry.file) || files.has(entry.file.slice(entry.file.lastIndexOf("/") + 1))));
     if (exports.length) scoped.push(exports.length === provider.exports.length ? provider : { ...provider, exports });
   }
   return scoped;
