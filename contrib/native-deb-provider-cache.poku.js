@@ -115,6 +115,35 @@ if (process.platform === "linux" && existsSync("/usr/bin/gpg") && existsSync("/u
     const members = new Set(loadNativeExternalMetadata(many.options).flatMap((entry) => entry.exports.map((member) => member.file)));
     for (const member of ["/usr/bin/find-me", "/usr/bin/neutral-command", "/usr/bin/exe-only.exe",
       "/usr/include/api/header.h", "/usr/libexec/helpers/real.cmd"]) assert(members.has(member), member);
+
+    // Explicit metadata retains its old cap independently of authenticated
+    // replay manifests. A 33rd operator path is not a replay admission.
+    const directMember = "#define FIXTURE_API 1\n";
+    writeFileSync(join(root, "direct.h"), directMember);
+    const directMetadata = Array.from({ length: 33 }, (_, i) => {
+      const snapshot = JSON.stringify({ schema: 1, name: `direct-${i}`, versionKind: "release", version: "1.0",
+        exports: [{ kind: "header-file", name: "direct.h" }], evidence: [{ path: "direct.h", sha256: sha(directMember) }] });
+      const metadata = `direct-${i}.json`;
+      writeFileSync(join(root, metadata), snapshot);
+      const manifest = join(root, `direct-${i}.manifest.json`);
+      writeFileSync(manifest, JSON.stringify({ schema: 1, providers: [{ metadata: { format: "provider-snapshot",
+        path: metadata, sha256: sha(snapshot) } }] }));
+      return manifest;
+    });
+    const expectedDirect = directMetadata.slice(0, 32);
+    assert.deepEqual(loadNativeExternalMetadata({ nativeProviderMetadata: directMetadata }).map((entry) => entry.manifestPath), expectedDirect);
+    const mixed = await acquireNativeEvidence(requirements, source, { ...manyOptions, nativeProviderMetadata: directMetadata });
+    const mixedProviders = loadNativeExternalMetadata(mixed.options);
+    assert.deepEqual(mixedProviders.filter((entry) => !entry.repositoryEvidence).map((entry) => entry.manifestPath), expectedDirect);
+    assert.deepEqual(mixedProviders.filter((entry) => entry.repositoryEvidence), loadNativeExternalMetadata(many.options));
+    assert.equal(new Set(mixedProviders.filter((entry) => entry.repositoryEvidence).map((entry) => entry.manifestPath)).size, 6);
+    assert(!mixed.options.nativeProviderMetadata.includes(directMetadata[32]));
+    assert(mixed.diagnostics.some((entry) => entry.family === "provider-metadata" && /32 explicit/.test(entry.prerequisite)));
+    // Re-loading an acquisition result or appending another direct path must
+    // not use the additional prepared budget for the unadmitted path.
+    assert.equal(loadNativeExternalMetadata({ ...mixed.options, nativeProviderMetadata: [directMetadata[32]] }).length, 1);
+    assert.deepEqual(loadNativeExternalMetadata({ ...mixed.options, nativeProviderMetadata: [...mixed.options.nativeProviderMetadata,
+      directMetadata[32]] }), mixedProviders);
     const direct = await acquireNativeEvidence(requirements, source, { ...options, nativeDebRepositories: repositories });
     assert.deepEqual(loadNativeExternalMetadata(direct.options), []);
     assert(direct.diagnostics.some((entry) => entry.family === "deb" && /four Debian archive suites/.test(entry.prerequisite)));

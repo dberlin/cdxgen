@@ -635,6 +635,12 @@ Two signed artifacts at the same package version remain separate
 when their package SHA-256 differs; byte-identical sightings can be merged.
 Project config and environment variables cannot select a replay descriptor.
 
+Up to 32 explicitly supplied provider metadata manifests are read per scan.
+Acquisition can additionally retain up to 32 internally authenticated,
+prepared manifests. Merely reading or caching another operator-supplied
+manifest does not admit it to the additional budget. All per-manifest and
+acquisition verification limits still apply.
+
 Operators can also import exact configured-package and finder-owner
 observations using `--native-scoped-receipt SHA256:/absolute/manifest.json`.
 Repeat the flag for up to sixteen distinct manifest paths, each with its
