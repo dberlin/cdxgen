@@ -286,6 +286,10 @@ const args = _yargs
     description:
       "Read configuration-scoped CMake/Meson provider facts captured outside the source tree. Stale or foreign facts are ignored; this option never configures or installs dependencies.",
   })
+  .option("native-scoped-receipt", {
+    type: "string",
+    description: "Import exact operator-approved configured package observations (SHA256:/absolute/manifest.json). Read-only; never configures or installs.",
+  })
   .option("compile-commands", {
     type: "string",
     description:
